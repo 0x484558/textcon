@@ -1,22 +1,19 @@
 use clap::{Parser, ValueEnum};
+use globset::{Glob, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use textcon::{Result, TemplateConfig, TextconError, find_references, process_template};
 
 const LONG_HELP: &str = r#"
-textcon - Text concatenation tool for LLM consumption
-
-Processes templates containing {{ @file.txt }} references and expands them with actual file contents or directory trees. Perfect for preparing code and configuration for Large Language Models.
-
-REFERENCE FORMAT:
+Reference:
   {{ @file.txt }}      - Include file contents (max 64KB)
   {{ @!file.txt }}     - Force include large file (>64KB)
   {{ @dirname/ }}      - Include directory tree
   {{ @!dirname/ }}     - Include tree AND all file contents
   {{ @. }} OR {{ @/ }} - Include tree of current directory
 
-EXAMPLES:
+Examples:
   # Process a template file
   textcon template.txt
   # Process from stdin
@@ -34,7 +31,7 @@ EXAMPLES:
   # Save output to file
   textcon template.txt -o output.txt
 
-TEMPLATE EXAMPLE:
+Template example:
   # My Project
   {{ @README.md }}
   ## Structure
@@ -44,56 +41,20 @@ TEMPLATE EXAMPLE:
   ## Logs (force include even if large)
   {{ @!logs/pod.log }}
 
-Copyright 2025 Vladyslav "Hex" Yamkovyi @ aleph0 s.r.o. - Licensed under the EUPL v1.2.
+
 For more information, visit: https://github.com/0x484558/textcon
 "#;
 
-/// textcon - Text concatenation tool for LLM consumption
+/// Text concatenation for LLM context building.
 ///
-/// Processes templates containing {{ @file.txt }} references and expands them
-/// with actual file contents or directory trees. Perfect for preparing code and
-/// configuration for Large Language Models.
-///
-/// REFERENCE FORMAT:
-///   {{ @file.txt }}      - Include file contents (max 64KB)
-///   {{ @!file.txt }}     - Force include large file (>64KB)
-///   {{ @dirname/ }}      - Include directory tree
-///   {{ @!dirname/ }}     - Include tree AND all file contents
-///   {{ @. }} OR {{ @/ }} - Include tree of current directory
-///
-/// EXAMPLES:
-///   # Process a template file
-///   textcon template.txt
-///   # Process from stdin
-///   echo "Code: {{ @main.rs }}" | textcon -
-///   # Check what would be included (dry run)
-///   textcon template.txt --dry-run
-///   # List all references in template
-///   textcon template.txt --list
-///   # List with details and check existence
-///   textcon template.txt --list=detailed
-///   # Output as JSON for scripting
-///   textcon template.txt --list=json
-///   # Use different base directory
-///   textcon template.txt --base-dir /path/to/project
-///   # Save output to file
-///   textcon template.txt -o output.txt
-///
-/// TEMPLATE EXAMPLE:
-///   # My Project
-///   {{ @README.md }}
-///   ## Structure
-///   {{ @. }}
-///   ## All Source Code
-///   {{ @!src/ }}
-///   ## Logs (force include even if large)
-///   {{ @!logs/pod.log }}
+/// Copyright 2025 Vladyslav "Hex" Yamkovyi @ aleph0 s.r.o.
+/// Licensed under the EUPL v1.2.
 #[derive(Parser, Debug)]
 #[command(
     name = "textcon",
     version,
     author = "Vladyslav 'Hex' Yamkovyi @ aleph0 s.r.o.",
-    about = "Text concatenation tool for LLM consumption",
+    about = "Text concatenation for LLM context building.",
     after_long_help = LONG_HELP,
     after_help = "For more information, visit: https://github.com/0x484558/textcon"
 )]
@@ -121,6 +82,10 @@ struct Cli {
     /// Perform a dry run - validate references without processing
     #[arg(long, conflicts_with = "list")]
     dry_run: bool,
+
+    /// Exclude glob patterns (repeatable). Patterns are relative to base-dir (default CWD)
+    #[arg(short = 'x', long = "exclude", value_name = "GLOB", action = clap::ArgAction::Append)]
+    exclude: Vec<String>,
 
     /// List references in template (optionally with format: plain, detailed, json)
     #[arg(long, value_name = "FORMAT", num_args = 0..=1, default_missing_value = "plain", conflicts_with = "dry_run")]
@@ -188,18 +153,50 @@ fn main() {
     };
 
     let result = if cli.dry_run {
-        dry_run(&cli.template, cli.base_dir, log_level)
+        dry_run(&cli.template, cli.base_dir.clone(), log_level)
     } else if let Some(list_format) = cli.list {
-        list_references(&cli.template, list_format, cli.base_dir, log_level)
+        list_references(&cli.template, list_format, cli.base_dir.clone(), log_level)
     } else {
+        // Build TemplateConfig from CLI options
+        let mut config = TemplateConfig::default();
+        if let Some(dir) = cli.base_dir.clone() {
+            config.base_dir = dir
+                .canonicalize()
+                .map_err(TextconError::Io)
+                .unwrap_or(config.base_dir);
+        }
+        config.max_tree_depth = cli.max_depth;
+        config.add_path_comments = !cli.no_comments;
+        if !cli.exclude.is_empty() {
+            let mut builder = GlobSetBuilder::new();
+            for pat in &cli.exclude {
+                match Glob::new(pat) {
+                    Ok(g) => {
+                        builder.add(g);
+                    }
+                    Err(e) => {
+                        eprintln!("[ERROR] Invalid exclude pattern '{pat}': {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            match builder.build() {
+                Ok(set) => {
+                    config.exclude = Some(set);
+                }
+                Err(e) => {
+                    eprintln!("[ERROR] Failed to build exclude set: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+
         process_template_file(
             &cli.template,
-            cli.base_dir,
-            cli.output,
-            cli.max_depth,
-            !cli.no_comments,
+            cli.output.clone(),
             cli.format,
             log_level,
+            &config,
         )
     };
 
@@ -211,26 +208,16 @@ fn main() {
 
 fn process_template_file(
     template: &PathBuf,
-    base_dir: Option<PathBuf>,
     output: Option<PathBuf>,
-    max_depth: Option<usize>,
-    add_comments: bool,
     format: OutputFormat,
     log_level: LogLevel,
+    config: &TemplateConfig,
 ) -> Result<()> {
     log(
         log_level,
         LogLevel::Debug,
         "Starting template processing...",
     );
-
-    // Set up configuration
-    let mut config = TemplateConfig::default();
-    if let Some(dir) = base_dir {
-        config.base_dir = dir.canonicalize().map_err(TextconError::Io)?;
-    }
-    config.max_tree_depth = max_depth;
-    config.add_path_comments = add_comments;
 
     // Read template
     let template_content = if *template == PathBuf::from("-") {
@@ -249,7 +236,7 @@ fn process_template_file(
 
     // Process template
     log(log_level, LogLevel::Debug, "Processing references...");
-    let processed = process_template(&template_content, &config)?;
+    let processed = process_template(&template_content, config)?;
 
     // Format output
     let formatted = match format {

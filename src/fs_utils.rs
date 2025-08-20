@@ -1,4 +1,5 @@
 use crate::error::{Result, TextconError};
+use globset::GlobSet;
 use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,7 +30,14 @@ fn remaining_depth_for_children(max_depth: Option<usize>) -> Option<usize> {
     max_depth.map(|d| d.saturating_sub(1))
 }
 
-fn walk_dir(dir: &Path, prefix: &str, remaining: Option<usize>, out: &mut String) -> Result<()> {
+fn walk_dir(
+    dir: &Path,
+    prefix: &str,
+    remaining: Option<usize>,
+    out: &mut String,
+    exclude: Option<&GlobSet>,
+    base_dir: &Path,
+) -> Result<()> {
     let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)
         .map_err(TextconError::Io)?
         .filter_map(std::result::Result::ok)
@@ -50,6 +58,28 @@ fn walk_dir(dir: &Path, prefix: &str, remaining: Option<usize>, out: &mut String
         let path = entry.path();
         let is_dir = path.is_dir();
 
+        // Exclusion by patterns relative to base_dir
+        if let Some(set) = exclude {
+            let base_canon = base_dir
+                .canonicalize()
+                .unwrap_or_else(|_| base_dir.to_path_buf());
+            let path_canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let rel_buf = path_canon
+                .strip_prefix(&base_canon)
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|_| path.clone());
+
+            let mut should_exclude = set.is_match(&rel_buf);
+            // If it's a directory and pattern like "dir/**" is used, match against a hypothetical child
+            if !should_exclude && is_dir {
+                let hypothetical_child = rel_buf.join("__textcon_dummy__");
+                should_exclude = set.is_match(&hypothetical_child);
+            }
+            if should_exclude {
+                continue;
+            }
+        }
+
         let connector = if is_last { "└── " } else { "├── " };
         let suffix = if is_dir { "/" } else { "" };
         writeln!(out, "{prefix}{connector}{name}{suffix}").unwrap();
@@ -64,20 +94,24 @@ fn walk_dir(dir: &Path, prefix: &str, remaining: Option<usize>, out: &mut String
 
             let next_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
             let next_remaining = remaining.map(|r| r.saturating_sub(1));
-            walk_dir(&path, &next_prefix, next_remaining, out)?;
+            walk_dir(&path, &next_prefix, next_remaining, out, exclude, base_dir)?;
         }
     }
 
     Ok(())
 }
-
 /// Generates a tree-like representation of a directory structure
 ///
 /// # Errors
 ///
 /// - `TextconError::DirectoryNotFound` if the path doesn't exist or isn't a directory.
 /// - `TextconError::WalkDir` if there's an error traversing the directory.
-pub fn generate_directory_tree(path: &Path, max_depth: Option<usize>) -> Result<String> {
+pub fn generate_directory_tree(
+    path: &Path,
+    max_depth: Option<usize>,
+    exclude: Option<&GlobSet>,
+    base_dir: &Path,
+) -> Result<String> {
     if !path.exists() {
         return Err(TextconError::DirectoryNotFound {
             path: path.to_path_buf(),
@@ -94,9 +128,8 @@ pub fn generate_directory_tree(path: &Path, max_depth: Option<usize>) -> Result<
 
     // Always print relative root
     writeln!(result, ".").unwrap();
-
     let remaining = remaining_depth_for_children(max_depth);
-    walk_dir(path, "", remaining, &mut result)?;
+    walk_dir(path, "", remaining, &mut result, exclude, base_dir)?;
 
     Ok(result)
 }
@@ -220,7 +253,7 @@ mod tests {
         fs::write(base.join("dir1/subdir/file3.txt"), "content").unwrap();
 
         // Test tree generation
-        let result = generate_directory_tree(base, None);
+        let result = generate_directory_tree(base, None, None, base);
         assert!(result.is_ok());
         let tree = result.unwrap();
 
@@ -245,7 +278,7 @@ mod tests {
         fs::write(base.join("level1/level2/level3/deep.txt"), "content").unwrap();
 
         // Test with max_depth = 2
-        let result = generate_directory_tree(base, Some(2));
+        let result = generate_directory_tree(base, Some(2), None, base);
         assert!(result.is_ok());
         let tree = result.unwrap();
 
@@ -265,7 +298,7 @@ mod tests {
         fs::write(base.join(".hidden"), "content").unwrap();
         fs::create_dir(base.join(".hidden_dir")).unwrap();
 
-        let result = generate_directory_tree(base, None);
+        let result = generate_directory_tree(base, None, None, base);
         assert!(result.is_ok());
         let tree = result.unwrap();
 
@@ -279,7 +312,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let base = temp_dir.path();
 
-        let result = generate_directory_tree(base, None);
+        let result = generate_directory_tree(base, None, None, base);
         assert!(result.is_ok());
         let tree = result.unwrap();
         assert!(tree.starts_with(".\n"));
@@ -291,7 +324,7 @@ mod tests {
 
         // Test non-existent directory
         let non_existent = temp_dir.path().join("nonexistent");
-        let result = generate_directory_tree(&non_existent, None);
+        let result = generate_directory_tree(&non_existent, None, None, temp_dir.path());
         assert!(matches!(
             result,
             Err(TextconError::DirectoryNotFound { .. })
@@ -300,7 +333,7 @@ mod tests {
         // Test file instead of directory
         let file_path = temp_dir.path().join("file.txt");
         fs::write(&file_path, "content").unwrap();
-        let result = generate_directory_tree(&file_path, None);
+        let result = generate_directory_tree(&file_path, None, None, temp_dir.path());
         assert!(matches!(
             result,
             Err(TextconError::DirectoryNotFound { .. })
@@ -474,5 +507,32 @@ mod tests {
 
         let result = resolve_reference_path("@文件.txt", base);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_generate_directory_tree_with_exclusions_dirs_and_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+
+        fs::create_dir(base.join("node_modules")).unwrap();
+        fs::write(base.join("node_modules/lib.js"), "ignored").unwrap();
+        fs::create_dir(base.join("target")).unwrap();
+        fs::write(base.join("target/build.o"), "ignored").unwrap();
+        fs::write(base.join("visible.txt"), "content").unwrap();
+        fs::write(base.join("app.log"), "exclude me").unwrap();
+
+        // Build exclusion set
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(globset::Glob::new("node_modules/**").unwrap());
+        builder.add(globset::Glob::new("target/**").unwrap());
+        builder.add(globset::Glob::new("*.log").unwrap());
+        let set = builder.build().unwrap();
+
+        let tree = generate_directory_tree(base, None, Some(&set), base).unwrap();
+
+        assert!(tree.contains("visible.txt"));
+        assert!(!tree.contains("node_modules"));
+        assert!(!tree.contains("target"));
+        assert!(!tree.contains("app.log"));
     }
 }

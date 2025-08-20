@@ -1,5 +1,6 @@
 use crate::error::{Result, TextconError};
 use crate::fs_utils::{generate_directory_tree, read_file_contents, resolve_reference_path};
+use globset::GlobSet;
 use regex::Regex;
 use std::fmt::Write;
 use std::fs;
@@ -21,6 +22,8 @@ pub struct TemplateConfig {
     pub add_path_comments: bool,
     /// Maximum file size before requiring force syntax
     pub max_file_size: u64,
+    /// Optional glob patterns to exclude (relative to `base_dir`)
+    pub exclude: Option<GlobSet>,
 }
 
 impl Default for TemplateConfig {
@@ -31,6 +34,7 @@ impl Default for TemplateConfig {
             inline_contents: true,
             add_path_comments: true,
             max_file_size: MAX_FILE_SIZE,
+            exclude: None,
         }
     }
 }
@@ -158,7 +162,12 @@ fn process_file_reference(path: &Path, config: &TemplateConfig, force: bool) -> 
 
 /// Processes a directory reference (tree only)
 fn process_directory_reference(path: &Path, config: &TemplateConfig) -> Result<String> {
-    let tree = generate_directory_tree(path, config.max_tree_depth)?;
+    let tree = generate_directory_tree(
+        path,
+        config.max_tree_depth,
+        config.exclude.as_ref(),
+        &config.base_dir,
+    )?;
 
     if config.add_path_comments {
         let path_str = path
@@ -289,6 +298,7 @@ mod tests {
             inline_contents: true,
             add_path_comments: true,
             max_file_size: 100, // Small size for testing
+            exclude: None,
         };
         (temp_dir, config)
     }
@@ -513,6 +523,45 @@ mod tests {
         // Test @/ reference (equivalent to @.)
         let result = process_reference("@/", &config, false);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_process_directory_reference_with_exclusions() {
+        let (temp_dir, mut config) = create_test_env();
+
+        // Create directories and files
+        let node_modules = temp_dir.path().join("node_modules");
+        fs::create_dir(&node_modules).unwrap();
+        fs::write(node_modules.join("lib.js"), "ignored").unwrap();
+
+        let target = temp_dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("build.o"), "ignored").unwrap();
+
+        let src = temp_dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("main.rs"), "fn main() {}").unwrap();
+
+        fs::write(temp_dir.path().join("app.log"), "should be excluded").unwrap();
+
+        // Build exclusion set
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(globset::Glob::new("node_modules/**").unwrap());
+        builder.add(globset::Glob::new("target/**").unwrap());
+        builder.add(globset::Glob::new("*.log").unwrap());
+        let set = builder.build().unwrap();
+        config.exclude = Some(set);
+
+        // Generate tree for current directory
+        let output = process_reference("@.", &config, false).unwrap();
+
+        // Excluded entries should not appear
+        assert!(!output.contains("node_modules"));
+        assert!(!output.contains("target"));
+        assert!(!output.contains("app.log"));
+        // Non-excluded should appear
+        assert!(output.contains("src/"));
+        assert!(output.contains("main.rs"));
     }
 
     #[test]

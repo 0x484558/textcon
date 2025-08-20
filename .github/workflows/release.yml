@@ -34,8 +34,6 @@ jobs:
           draft: true
           prerelease: false
           body: |
-            # Release ${{ steps.get_version.outputs.version }}
-
             Download the appropriate binary for your platform below and add it to your PATH.
 
             ### macOS/Linux
@@ -164,6 +162,7 @@ jobs:
     name: Publish to crates.io
     needs: build-release
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
 
