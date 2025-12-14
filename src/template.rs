@@ -24,6 +24,8 @@ pub struct TemplateConfig {
     pub max_file_size: u64,
     /// Optional glob patterns to exclude (relative to `base_dir`)
     pub exclude: Option<GlobSet>,
+    /// Whether to respect .gitignore files
+    pub use_gitignore: bool,
 }
 
 impl Default for TemplateConfig {
@@ -35,6 +37,7 @@ impl Default for TemplateConfig {
             add_path_comments: true,
             max_file_size: MAX_FILE_SIZE,
             exclude: None,
+            use_gitignore: true,
         }
     }
 }
@@ -167,6 +170,7 @@ fn process_directory_reference(path: &Path, config: &TemplateConfig) -> Result<S
         config.max_tree_depth,
         config.exclude.as_ref(),
         &config.base_dir,
+        config.use_gitignore,
     )?;
 
     if config.add_path_comments {
@@ -299,6 +303,7 @@ mod tests {
             add_path_comments: true,
             max_file_size: 100, // Small size for testing
             exclude: None,
+            use_gitignore: false,
         };
         (temp_dir, config)
     }
@@ -621,6 +626,7 @@ mod tests {
         assert!(config.inline_contents);
         assert!(config.add_path_comments);
         assert_eq!(config.max_file_size, MAX_FILE_SIZE);
+        assert!(config.use_gitignore);
     }
 
     #[test]

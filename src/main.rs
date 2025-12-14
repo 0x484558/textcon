@@ -2,7 +2,7 @@ use clap::{Parser, ValueEnum};
 use globset::{Glob, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use textcon::{Result, TemplateConfig, TextconError, find_references, process_template};
 
 const LONG_HELP: &str = r#"
@@ -47,13 +47,13 @@ For more information, visit: https://github.com/0x484558/textcon
 
 /// Text concatenation for LLM context building.
 ///
-/// Copyright 2025 Vladyslav "Hex" Yamkovyi @ aleph0 s.r.o.
+/// Copyright 2025 0x484558 @ aleph0 s.r.o.
 /// Licensed under the EUPL v1.2.
 #[derive(Parser, Debug)]
 #[command(
     name = "textcon",
     version,
-    author = "Vladyslav 'Hex' Yamkovyi @ aleph0 s.r.o.",
+    author = "0x484558 @ aleph0 s.r.o.",
     about = "Text concatenation for LLM context building.",
     after_long_help = LONG_HELP,
     after_help = "For more information, visit: https://github.com/0x484558/textcon"
@@ -86,6 +86,10 @@ struct Cli {
     /// Exclude glob patterns (repeatable). Patterns are relative to base-dir (default CWD)
     #[arg(short = 'x', long = "exclude", value_name = "GLOB", action = clap::ArgAction::Append)]
     exclude: Vec<String>,
+
+    /// Disable compliance with .gitignore files
+    #[arg(long)]
+    no_gitignore: bool,
 
     /// List references in template (optionally with format: plain, detailed, json)
     #[arg(long, value_name = "FORMAT", num_args = 0..=1, default_missing_value = "plain", conflicts_with = "dry_run")]
@@ -167,6 +171,7 @@ fn main() {
         }
         config.max_tree_depth = cli.max_depth;
         config.add_path_comments = !cli.no_comments;
+        config.use_gitignore = !cli.no_gitignore;
         if !cli.exclude.is_empty() {
             let mut builder = GlobSetBuilder::new();
             for pat in &cli.exclude {
@@ -220,7 +225,7 @@ fn process_template_file(
     );
 
     // Read template
-    let template_content = if *template == PathBuf::from("-") {
+    let template_content = if template.as_path() == Path::new("-") {
         log(log_level, LogLevel::Info, "Reading template from stdin...");
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
@@ -269,7 +274,7 @@ fn dry_run(template: &PathBuf, base_dir: Option<PathBuf>, log_level: LogLevel) -
         "Performing dry run - validating references...",
     );
 
-    let template_content = if *template == PathBuf::from("-") {
+    let template_content = if template.as_path() == Path::new("-") {
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
         buffer
@@ -343,7 +348,7 @@ fn list_references(
 ) -> Result<()> {
     log(log_level, LogLevel::Debug, "Listing template references...");
 
-    let template_content = if *template == PathBuf::from("-") {
+    let template_content = if template.as_path() == Path::new("-") {
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
         buffer

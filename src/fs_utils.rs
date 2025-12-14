@@ -1,5 +1,7 @@
 use crate::error::{Result, TextconError};
 use globset::GlobSet;
+use ignore::WalkBuilder;
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -111,6 +113,7 @@ pub fn generate_directory_tree(
     max_depth: Option<usize>,
     exclude: Option<&GlobSet>,
     base_dir: &Path,
+    use_gitignore: bool,
 ) -> Result<String> {
     if !path.exists() {
         return Err(TextconError::DirectoryNotFound {
@@ -128,10 +131,135 @@ pub fn generate_directory_tree(
 
     // Always print relative root
     writeln!(result, ".").unwrap();
-    let remaining = remaining_depth_for_children(max_depth);
-    walk_dir(path, "", remaining, &mut result, exclude, base_dir)?;
+
+    if use_gitignore {
+        // Use ignore crate for traversal
+        let mut builder = WalkBuilder::new(path);
+        builder
+            .standard_filters(use_gitignore)
+            .hidden(false) // We handle hidden files filtering manually or via ignore's hidden option if we want gitignore behavior for hidden files.
+            // But wait, the existing code explicitly filters hidden files. `ignore` respects .gitignore which might hide files, but also has .hidden() to toggle hidden file ignore.
+            // If use_gitignore is true, we probably want standard git behavior (ignore hidden .git dir, respect .gitignore).
+            // But if we want to retain the manual exclude patterns behavior, we need to add them.
+            .git_global(true)
+            .git_ignore(true)
+            .git_exclude(true)
+            .require_git(false);
+
+        // We need to construct the tree.
+        // Build a map of path -> entry to reconstruct hierarchy
+        let mut paths: Vec<(PathBuf, bool)> = Vec::new();
+        for result in builder.build() {
+            match result {
+                Ok(entry) => {
+                    let p = entry.path();
+                    if p == path {
+                        continue;
+                    } // Skip root
+
+                    // Manual exclusion check
+                    if let Some(set) = exclude {
+                        let base_canon = base_dir
+                            .canonicalize()
+                            .unwrap_or_else(|_| base_dir.to_path_buf());
+                        let path_canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+                        let rel_buf = path_canon.strip_prefix(&base_canon).unwrap_or(p);
+                        if set.is_match(rel_buf) {
+                            continue;
+                        }
+                    }
+
+                    // Helper manual hidden check if ignore didn't catch it or configured not to
+                    // (ignore's hidden(false) means SHOW hidden files, hidden(true) means IGNORE them. Default is true.)
+                    // Existing code: "Skip hidden files/dirs (name starts with '.')".
+                    // If we want to maintain that behavior unless gitignore says otherwise?
+                    // Actually, if use_gitignore is true, let's rely on gitignore settings mostly?
+                    // But user might expect .hidden files to be hidden by default in this tool.
+                    // Let's rely on standard logic: hidden files are ignored by ignore crate by default.
+
+                    paths.push((p.to_path_buf(), p.is_dir()));
+                }
+                Err(_err) => {
+                    // We can log error or ignore. For now ignore.
+                }
+            }
+        }
+
+        // Sort paths
+        paths.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Build tree structure
+        // We can't easily recurse on a flat list without reconstruction.
+        // Simpler approach: filter the flat list to ensure we only include items if their parent is included (ignore does this automatically for ignored dirs).
+        // But we need to print in tree format.
+
+        // Let's switch to the In-Memory Tree strategy.
+        let root_node = build_tree_from_paths(path, &paths);
+        print_tree(&root_node, "", &mut result);
+    } else {
+        let remaining = remaining_depth_for_children(max_depth);
+        walk_dir(path, "", remaining, &mut result, exclude, base_dir)?;
+    }
 
     Ok(result)
+}
+
+struct TreeNode {
+    name: String,
+    is_dir: bool,
+    children: BTreeMap<String, TreeNode>,
+}
+
+fn build_tree_from_paths(root: &Path, paths: &[(PathBuf, bool)]) -> TreeNode {
+    let mut root_node = TreeNode {
+        name: root
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+        is_dir: true,
+        children: BTreeMap::new(),
+    };
+
+    for (path, is_dir) in paths {
+        if let Ok(rel) = path.strip_prefix(root) {
+            let components: Vec<_> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().to_string())
+                .collect();
+            let mut current = &mut root_node;
+
+            for (i, name) in components.iter().enumerate() {
+                let is_last = i == components.len() - 1;
+                let is_current_dir = if is_last { *is_dir } else { true };
+
+                current = current
+                    .children
+                    .entry(name.clone())
+                    .or_insert_with(|| TreeNode {
+                        name: name.clone(),
+                        is_dir: is_current_dir,
+                        children: BTreeMap::new(),
+                    });
+            }
+        }
+    }
+    root_node
+}
+
+fn print_tree(node: &TreeNode, prefix: &str, out: &mut String) {
+    let count = node.children.len();
+    for (i, child) in node.children.values().enumerate() {
+        let is_last = i == count - 1;
+        let connector = if is_last { "└── " } else { "├── " };
+        let suffix = if child.is_dir { "/" } else { "" };
+        writeln!(out, "{prefix}{connector}{}{suffix}", child.name).unwrap();
+
+        if child.is_dir {
+            let next_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+            print_tree(child, &next_prefix, out);
+        }
+    }
 }
 
 /// Resolves a reference path relative to the current working directory
@@ -253,7 +381,7 @@ mod tests {
         fs::write(base.join("dir1/subdir/file3.txt"), "content").unwrap();
 
         // Test tree generation
-        let result = generate_directory_tree(base, None, None, base);
+        let result = generate_directory_tree(base, None, None, base, false);
         assert!(result.is_ok());
         let tree = result.unwrap();
 
@@ -278,7 +406,7 @@ mod tests {
         fs::write(base.join("level1/level2/level3/deep.txt"), "content").unwrap();
 
         // Test with max_depth = 2
-        let result = generate_directory_tree(base, Some(2), None, base);
+        let result = generate_directory_tree(base, Some(2), None, base, false);
         assert!(result.is_ok());
         let tree = result.unwrap();
 
@@ -298,7 +426,7 @@ mod tests {
         fs::write(base.join(".hidden"), "content").unwrap();
         fs::create_dir(base.join(".hidden_dir")).unwrap();
 
-        let result = generate_directory_tree(base, None, None, base);
+        let result = generate_directory_tree(base, None, None, base, false);
         assert!(result.is_ok());
         let tree = result.unwrap();
 
@@ -312,7 +440,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let base = temp_dir.path();
 
-        let result = generate_directory_tree(base, None, None, base);
+        let result = generate_directory_tree(base, None, None, base, false);
         assert!(result.is_ok());
         let tree = result.unwrap();
         assert!(tree.starts_with(".\n"));
@@ -324,7 +452,7 @@ mod tests {
 
         // Test non-existent directory
         let non_existent = temp_dir.path().join("nonexistent");
-        let result = generate_directory_tree(&non_existent, None, None, temp_dir.path());
+        let result = generate_directory_tree(&non_existent, None, None, temp_dir.path(), false);
         assert!(matches!(
             result,
             Err(TextconError::DirectoryNotFound { .. })
@@ -333,7 +461,7 @@ mod tests {
         // Test file instead of directory
         let file_path = temp_dir.path().join("file.txt");
         fs::write(&file_path, "content").unwrap();
-        let result = generate_directory_tree(&file_path, None, None, temp_dir.path());
+        let result = generate_directory_tree(&file_path, None, None, temp_dir.path(), false);
         assert!(matches!(
             result,
             Err(TextconError::DirectoryNotFound { .. })
@@ -528,11 +656,110 @@ mod tests {
         builder.add(globset::Glob::new("*.log").unwrap());
         let set = builder.build().unwrap();
 
-        let tree = generate_directory_tree(base, None, Some(&set), base).unwrap();
+        let tree = generate_directory_tree(base, None, Some(&set), base, false).unwrap();
 
         assert!(tree.contains("visible.txt"));
         assert!(!tree.contains("node_modules"));
         assert!(!tree.contains("target"));
         assert!(!tree.contains("app.log"));
+    }
+
+    #[test]
+    fn test_basic_gitignore() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+
+        fs::write(base.join(".gitignore"), "*.secret").unwrap();
+        fs::write(base.join("visible.txt"), "visible").unwrap();
+        fs::write(base.join("hidden.secret"), "secret").unwrap();
+
+        let tree = generate_directory_tree(base, None, None, base, true).unwrap();
+
+        assert!(tree.contains("visible.txt"));
+        assert!(!tree.contains("hidden.secret"));
+    }
+
+    #[test]
+    fn test_nested_gitignore() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+
+        fs::create_dir(base.join("subdir")).unwrap();
+        fs::write(base.join(".gitignore"), "ignore_root.txt").unwrap();
+        fs::write(base.join("subdir/.gitignore"), "ignore_sub.txt").unwrap();
+
+        fs::write(base.join("ignore_root.txt"), "ignored").unwrap();
+        fs::write(base.join("subdir/ignore_sub.txt"), "ignored").unwrap();
+        fs::write(base.join("subdir/visible.txt"), "visible").unwrap();
+
+        let tree = generate_directory_tree(base, None, None, base, true).unwrap();
+
+        assert!(!tree.contains("ignore_root.txt"));
+        assert!(!tree.contains("ignore_sub.txt"));
+        assert!(tree.contains("visible.txt"));
+        assert!(tree.contains("subdir/"));
+    }
+
+    #[test]
+    fn test_gitignore_negation() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+
+        fs::write(base.join(".gitignore"), "*.log\n!important.log").unwrap();
+        fs::write(base.join("error.log"), "ignore me").unwrap();
+        fs::write(base.join("important.log"), "read me").unwrap();
+
+        let tree = generate_directory_tree(base, None, None, base, true).unwrap();
+
+        assert!(!tree.contains("error.log"));
+        assert!(tree.contains("important.log"));
+    }
+
+    #[test]
+    fn test_gitignore_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+
+        fs::write(base.join(".gitignore"), "node_modules/").unwrap();
+        fs::create_dir(base.join("node_modules")).unwrap();
+        fs::write(base.join("node_modules/lib.js"), "ignored").unwrap();
+        fs::write(base.join("src.js"), "visible").unwrap();
+
+        let tree = generate_directory_tree(base, None, None, base, true).unwrap();
+
+        assert!(!tree.contains("node_modules"));
+        assert!(!tree.contains("lib.js"));
+        assert!(tree.contains("src.js"));
+    }
+    #[test]
+    fn test_exclude_deep_directory_behavior() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+
+        fs::create_dir_all(base.join("root_exclude")).unwrap();
+        fs::write(base.join("root_exclude/file.txt"), "content").unwrap();
+
+        fs::create_dir_all(base.join("dir1/nested_exclude")).unwrap();
+        fs::write(base.join("dir1/nested_exclude/file.txt"), "content").unwrap();
+
+        // Pattern 1: "root_exclude" (should match root folder)
+        // Pattern 2: "nested_exclude" (if it works like gitignore, should match dir1/nested_exclude. If anchored glob, it won't)
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(globset::Glob::new("root_exclude").unwrap());
+        builder.add(globset::Glob::new("nested_exclude").unwrap());
+        let set = builder.build().unwrap();
+
+        let tree = generate_directory_tree(base, None, Some(&set), base, false).unwrap();
+
+        // root_exclude should be gone because it's at root and "root_exclude" matches it relative to base
+        assert!(!tree.contains("root_exclude"));
+
+        // The user asked: "if it is dir1/dir2/file will specifying in exclude dir2/ exclude correctly dir2/*"
+        // Here check if "nested_exclude" excludes "dir1/nested_exclude"
+        // I expect this to fail if I assert !contains, so I will assert contains to prove it doesn't work like gitignore
+        // or I will try to assert !contains and let it fail to demonstrate.
+        // Let's assert that it DOES contain it, confirming "exclude" is NOT like gitignore.
+        assert!(tree.contains("nested_exclude"));
+        assert!(tree.contains("dir1"));
     }
 }

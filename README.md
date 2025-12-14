@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/0x484558/textcon/actions/workflows/ci.yml/badge.svg)](https://github.com/0x484558/textcon/actions/workflows/ci.yml)
 [![Release](https://github.com/0x484558/textcon/actions/workflows/release.yml/badge.svg)](https://github.com/0x484558/textcon/actions/workflows/release.yml)
-[![Security Audit](https://github.com/0x484558/textcon/actions/workflows/audit.yml/badge.svg)](https://github.com/0x484558/textcon/actions/workflows/audit.yml)
 [![Documentation](https://github.com/0x484558/textcon/actions/workflows/docs.yml/badge.svg)](https://github.com/0x484558/textcon/actions/workflows/docs.yml)
 [![License: EUPL-1.2](https://img.shields.io/badge/License-EUPL--1.2-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/textcon.svg)](https://crates.io/crates/textcon)
@@ -61,7 +60,15 @@ All these formats are equivalent for `file.txt` in the current directory:
 - `{{ @/file.txt }}`
 - `{{ @./file.txt }}`
 
-Leading slashes are ignored - all paths are relative to the base directory.
+
+### Exclusions
+
+- **.gitignore**: Respected by default. Use `--no-gitignore` to disable.
+- **Manual exclusions**: Use `--exclude "GLOB"` (e.g., `--exclude "node_modules/**"`) to exclude specific patterns. Note that manual exclusion patterns:
+    - Are relative to the base directory.
+    - Do NOT support implicit recursion (e.g., `dir` only excludes `dir` at root, not `subdir/dir`). Use `**/dir` for recursive exclusion.
+    - Do NOT support negation.
+
 
 ## CLI Usage
 
@@ -80,6 +87,12 @@ textcon template.txt --base-dir /path/to/project
 
 # Limit directory tree depth
 textcon template.txt --max-depth 3
+
+# Exclude specific files/patterns (glob)
+textcon template.txt --exclude "*.log" --exclude "secrets/**"
+
+# Disable .gitignore compliance (enabled by default)
+textcon template.txt --no-gitignore
 
 # Remove file path comments
 textcon template.txt --no-comments
@@ -111,6 +124,7 @@ fn main() -> textcon::Result<()> {
         add_path_comments: true,
         max_file_size: 128 * 1024, // 128KB limit
         inline_contents: true,
+        ..TemplateConfig::default()
     };
     // Alternatively, `TemplateConfig::default();`
     
@@ -143,4 +157,5 @@ Common errors and solutions:
 - [regex](https://github.com/rust-lang/regex) - Pattern matching (Apache-2.0/MIT)
 - [thiserror](https://github.com/dtolnay/thiserror) - Error handling (Apache-2.0/MIT)
 - [walkdir](https://github.com/BurntSushi/walkdir) - Directory traversal (MIT/Unlicense)
+- [ignore](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore) - Fast file ignore (MIT/Unlicense)
 - [serde](https://github.com/serde-rs/serde) - Serialization framework (Apache-2.0/MIT)
