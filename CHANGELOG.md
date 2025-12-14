@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2025-12-14
+
+### Changed
+- **BREAKING**: CLI now accepts files/directories as positional arguments for stitching.
+- **BREAKING**: Template processing now requires `--template` flag (e.g., `textcon --template tpl.txt`).
+
+### Added
+- Gitignore support enabled by default.
+- `--no-gitignore` flag to disable gitignore support.
+- Glob exclusions and .gitignore support
+
 ## [0.1.0] - 2025-08-20
 
 ### Added
@@ -19,5 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Path traversal protection prevents access outside base directory
 - Automatic filtering of hidden files and directories
 
-[Unreleased]: https://github.com/0x484558/textcon/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/0x484558/textcon/releases/tag/v0.1.0
+[Unreleased]: https://github.com/0x484558/textcon/compare/0.2.0...HEAD
+[0.2.0]: https://github.com/0x484558/textcon/releases/tag/0.2.0
+[0.1.0]: https://github.com/0x484558/textcon/releases/tag/0.1.0
