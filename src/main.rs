@@ -15,21 +15,23 @@ Reference:
 
 Examples:
   # Process a template file
-  textcon template.txt
+  textcon --template template.txt
+  # Stitch files together
+  textcon src/main.rs src/lib.rs
   # Process from stdin
-  echo "Code: {{ @main.rs }}" | textcon -
+  echo "Code: {{ @main.rs }}" | textcon --template -
   # Check what would be included (dry run)
-  textcon template.txt --dry-run
+  textcon --template template.txt --dry-run
   # List all references in template
-  textcon template.txt --list
+  textcon --template template.txt --list
   # List with details and check existence
-  textcon template.txt --list=detailed
+  textcon --template template.txt --list=detailed
   # Output as JSON for scripting
-  textcon template.txt --list=json
+  textcon --template template.txt --list=json
   # Use different base directory
-  textcon template.txt --base-dir /path/to/project
+  textcon --template template.txt --base-dir /path/to/project
   # Save output to file
-  textcon template.txt -o output.txt
+  textcon --template template.txt -o output.txt
 
 Template example:
   # My Project
@@ -59,9 +61,13 @@ For more information, visit: https://github.com/0x484558/textcon
     after_help = "For more information, visit: https://github.com/0x484558/textcon"
 )]
 struct Cli {
-    /// Template file to process (use '-' for stdin)
-    #[arg(value_name = "TEMPLATE")]
-    template: PathBuf,
+    /// Files and directories to process (stitching mode)
+    #[arg(value_name = "INPUTS", required_unless_present = "template")]
+    inputs: Vec<PathBuf>,
+
+    /// Template file to process (legacy mode). Use '-' for stdin.
+    #[arg(long, short, value_name = "TEMPLATE", conflicts_with = "inputs")]
+    template: Option<PathBuf>,
 
     /// Base directory for resolving @ references
     #[arg(short, long, value_name = "DIR", env = "TEXTCON_BASE_DIR")]
@@ -156,10 +162,24 @@ fn main() {
         (false, _) => LogLevel::Trace,
     };
 
+    // Get template content (either from file or synthesized from inputs)
+    let template_content = match get_template_content(&cli, log_level) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let result = if cli.dry_run {
-        dry_run(&cli.template, cli.base_dir.clone(), log_level)
+        dry_run(&template_content, cli.base_dir.clone(), log_level)
     } else if let Some(list_format) = cli.list {
-        list_references(&cli.template, list_format, cli.base_dir.clone(), log_level)
+        list_references(
+            &template_content,
+            list_format,
+            cli.base_dir.clone(),
+            log_level,
+        )
     } else {
         // Build TemplateConfig from CLI options
         let mut config = TemplateConfig::default();
@@ -196,8 +216,8 @@ fn main() {
             }
         }
 
-        process_template_file(
-            &cli.template,
+        process_template_content(
+            &template_content,
             cli.output.clone(),
             cli.format,
             log_level,
@@ -211,8 +231,51 @@ fn main() {
     }
 }
 
-fn process_template_file(
-    template: &PathBuf,
+fn get_template_content(cli: &Cli, log_level: LogLevel) -> Result<String> {
+    if let Some(template_path) = &cli.template {
+        // Legacy mode: read from file/stdin
+        if template_path.as_path() == Path::new("-") {
+            log(log_level, LogLevel::Info, "Reading template from stdin...");
+            let mut buffer = String::new();
+            io::stdin().read_to_string(&mut buffer)?;
+            Ok(buffer)
+        } else {
+            log(
+                log_level,
+                LogLevel::Info,
+                &format!("Reading template from {}", template_path.display()),
+            );
+            std::fs::read_to_string(template_path).map_err(Into::into)
+        }
+    } else {
+        // Stitching mode: synthesize template from inputs
+        log(
+            log_level,
+            LogLevel::Info,
+            "Synthesizing template from inputs...",
+        );
+        let mut template = String::new();
+        for input in &cli.inputs {
+            // For each input, we want to force include its content/tree
+            // If it's a dir, @!path/
+            // If it's a file, @!path
+            // We can just append @!path and let the engine resolve type,
+            // but adding trailing slash for dirs helps clarity if we can know it efficiently?
+            // Actually, metadata check is done in process_reference.
+            let input_str = input.to_string_lossy();
+            let ref_str = if input.is_dir() {
+                format!("{{{{ @!{}/ }}}}\n", input_str)
+            } else {
+                format!("{{{{ @!{} }}}}\n", input_str)
+            };
+            template.push_str(&ref_str);
+        }
+        Ok(template)
+    }
+}
+
+fn process_template_content(
+    template_content: &str,
     output: Option<PathBuf>,
     format: OutputFormat,
     log_level: LogLevel,
@@ -224,24 +287,9 @@ fn process_template_file(
         "Starting template processing...",
     );
 
-    // Read template
-    let template_content = if template.as_path() == Path::new("-") {
-        log(log_level, LogLevel::Info, "Reading template from stdin...");
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        buffer
-    } else {
-        log(
-            log_level,
-            LogLevel::Info,
-            &format!("Reading template from {}", template.display()),
-        );
-        std::fs::read_to_string(template)?
-    };
-
     // Process template
     log(log_level, LogLevel::Debug, "Processing references...");
-    let processed = process_template(&template_content, config)?;
+    let processed = process_template(template_content, config)?;
 
     // Format output
     let formatted = match format {
@@ -267,22 +315,14 @@ fn process_template_file(
     Ok(())
 }
 
-fn dry_run(template: &PathBuf, base_dir: Option<PathBuf>, log_level: LogLevel) -> Result<()> {
+fn dry_run(template_content: &str, base_dir: Option<PathBuf>, log_level: LogLevel) -> Result<()> {
     log(
         log_level,
         LogLevel::Info,
         "Performing dry run - validating references...",
     );
 
-    let template_content = if template.as_path() == Path::new("-") {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        buffer
-    } else {
-        std::fs::read_to_string(template)?
-    };
-
-    let references = find_references(&template_content)?;
+    let references = find_references(template_content)?;
     let references_count = references.len();
 
     let base =
@@ -341,22 +381,14 @@ fn dry_run(template: &PathBuf, base_dir: Option<PathBuf>, log_level: LogLevel) -
 }
 
 fn list_references(
-    template: &PathBuf,
+    template_content: &str,
     format: ListFormat,
     base_dir: Option<PathBuf>,
     log_level: LogLevel,
 ) -> Result<()> {
     log(log_level, LogLevel::Debug, "Listing template references...");
 
-    let template_content = if template.as_path() == Path::new("-") {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        buffer
-    } else {
-        std::fs::read_to_string(template)?
-    };
-
-    let references = find_references(&template_content)?;
+    let references = find_references(template_content)?;
     let base =
         base_dir.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 

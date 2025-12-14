@@ -1,6 +1,6 @@
 [package]
 name = "textcon"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 authors = ["Vladyslav \"Hex\" Yamkovyi <hex@aleph0.ai>"]
 description = "Template text files with file/directory references for AI/LLM consumption"

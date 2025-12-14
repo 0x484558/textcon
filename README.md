@@ -36,8 +36,16 @@ Create a template file with `{{ @file }}` references:
 
 Process the template:
 
+Process the template:
+
 ```bash
-textcon template.txt
+textcon --template template.txt
+```
+
+Alternatively, just stitch files together without a template file:
+
+```bash
+textcon src/main.rs src/lib.rs > output.txt
 ```
 
 ## Reference Format
@@ -74,38 +82,43 @@ All these formats are equivalent for `file.txt` in the current directory:
 
 ```bash
 # Process a template file
-textcon template.txt
+textcon --template template.txt
+
+# Stitch files and directories together
+textcon src/main.rs src/lib.rs
 
 # Process from stdin
-echo "Code: {{ @main.rs }}" | textcon -
+echo "Code: {{ @main.rs }}" | textcon --template -
 
 # Write to file
-textcon template.txt -o output.txt
+textcon --template template.txt -o output.txt
 
 # Use different base directory
-textcon template.txt --base-dir /path/to/project
+textcon --template template.txt --base-dir /path/to/project
 
 # Limit directory tree depth
-textcon template.txt --max-depth 3
+textcon src/ --max-depth 3
 
 # Exclude specific files/patterns (glob)
-textcon template.txt --exclude "*.log" --exclude "secrets/**"
+textcon src/ --exclude "*.log" --exclude "secrets/**"
 
 # Disable .gitignore compliance (enabled by default)
-textcon template.txt --no-gitignore
+textcon src/ --no-gitignore
 
 # Remove file path comments
-textcon template.txt --no-comments
+textcon src/ --no-comments
 
 # Check validity of references
-textcon template.txt --dry-run
+textcon --template template.txt --dry-run
+# (Works with inputs too)
+textcon src/ --dry-run
 
 # List references found in the template
-textcon template.txt --list
+textcon --template template.txt --list
 # Detailed information
-textcon template.txt --list=detailed
+textcon --template template.txt --list=detailed
 # JSON output for scripting
-textcon template.txt --list=json
+textcon --template template.txt --list=json
 
 # View help with examples
 textcon --help

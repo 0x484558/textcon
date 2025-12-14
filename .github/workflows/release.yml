@@ -162,7 +162,7 @@ jobs:
     name: Publish to crates.io
     needs: build-release
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
 
