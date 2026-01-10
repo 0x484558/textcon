@@ -6,9 +6,9 @@
 [![License: EUPL-1.2](https://img.shields.io/badge/License-EUPL--1.2-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/textcon.svg)](https://crates.io/crates/textcon)
 
-A **text** **con**catenation tool that fills in provided template by expanding file and directory references into a single corpus suitable for Large Language Model (LLM) consumption. Perfect for preparing code, configurations, and project structures for consumption by web versions of AI assistants like ChatGPT, Claude, Gemini, and others.
+Simple **text** **con**catenation tool that stitches files together into a body of text suitable for consumption by Large Language Models (LLMs). Perfect for preparing code, configurations, and project structures for consumption by web versions of AI assistants like ChatGPT, Claude, Gemini, and others.
 
-Can be used as either CLI tool or Rust library. Embeds file contents directly into templates, generates visual directory structures. Resolves relative paths and symlinks within the base directory only, but allows flexible path formatting ([Postel's law](https://en.wikipedia.org/wiki/Robustness_principle)) and uses explicit notation for including large files or deep directory contents.
+Can be used as either CLI tool or Rust library. Embeds file contents directly into templates by resolving references recursively. Resolves relative paths and symlinks within the base directory only, following best security practices to prevent path traversal.
 
 ## Installation
 
@@ -20,7 +20,17 @@ Alternatively, download a release from GitHub.
 
 ## Quick Start
 
-Create a template file with `{{ @file }}` references:
+The simplest way to use `textcon` is to stitch files and directories together:
+
+```bash
+# Combine specific files
+textcon src/main.rs src/lib.rs
+
+# Recursively include all files in a directory
+textcon src/
+```
+
+For more control, create a template file with `{{ @file }}` references:
 
 ```text
 # My Project
@@ -29,37 +39,26 @@ Create a template file with `{{ @file }}` references:
 
 {{ @src/main.rs }}
 
-## Project Structure
+## Project Source
 
 {{ @. }}
 ```
 
-Process the template:
+Process the template using the `--template` flag:
 
 ```bash
 textcon --template template.txt
-```
-
-Alternatively, just stitch files together without a template file:
-
-```bash
-textcon src/main.rs src/lib.rs > output.txt
 ```
 
 ## Reference Format
 
 ### Basic Syntax
 
-| Pattern | Description | Size Limit |
-|---------|-------------|------------|
-| `{{ @file.txt }}` | Include file contents | 64KB max |
-| `{{ @!file.txt }}` | Force include large file | No limit |
-| `{{ @dir/ }}` | Show directory tree only | N/A |
-| `{{ @!dir/ }}` | Show tree + all file contents | No limit per file |
-| `{{ @. }}` | Current directory tree | N/A |
-| `{{ @!. }}` | Current dir tree + all files | No limit per file |
-
-### Path Formats
+| Pattern | Description |
+|---------|-------------|
+| `{{ @file.txt }}` | Include file contents |
+| `{{ @dir/ }}` | Include all file contents in directory |
+| `{{ @. }}` | Include all files from current directory |
 
 All these formats are equivalent for `file.txt` in the current directory:
 - `{{ @file.txt }}`
@@ -70,11 +69,9 @@ All these formats are equivalent for `file.txt` in the current directory:
 ### Exclusions
 
 - **.gitignore**: Respected by default. Use `--no-gitignore` to disable.
-- **Manual exclusions**: Use `--exclude "GLOB"` (e.g., `--exclude "node_modules/**"`) to exclude specific patterns. Note that manual exclusion patterns:
-    - Are relative to the base directory.
-    - Do NOT support implicit recursion (e.g., `dir` only excludes `dir` at root, not `subdir/dir`). Use `**/dir` for recursive exclusion.
-    - Do NOT support negation.
+- **Manual exclusions**: Use `--exclude "PATTERN"` to exclude specific paths.
 
+Patterns without slashes match at any depth, leading slashes anchor to the base directory, and negation (e.g., `--exclude "!important.txt"`) is supported to explicitly include files.
 
 ## CLI Usage
 
@@ -94,7 +91,7 @@ textcon --template template.txt -o output.txt
 # Use different base directory
 textcon --template template.txt --base-dir /path/to/project
 
-# Limit directory tree depth
+# Limit directory recursion depth
 textcon src/ --max-depth 3
 
 # Exclude specific files/patterns (glob)
@@ -102,9 +99,6 @@ textcon src/ --exclude "*.log" --exclude "secrets/**"
 
 # Disable .gitignore compliance (enabled by default)
 textcon src/ --no-gitignore
-
-# Remove file path comments
-textcon src/ --no-comments
 
 # Check validity of references
 textcon --template template.txt --dry-run
@@ -125,6 +119,7 @@ textcon --help
 ## Library Usage
 
 ```rust
+use std::path::PathBuf;
 use textcon::{process_template, TemplateConfig};
 
 fn main() -> textcon::Result<()> {
@@ -132,8 +127,6 @@ fn main() -> textcon::Result<()> {
     let config = TemplateConfig {
         base_dir: PathBuf::from("/my/project"),
         max_tree_depth: Some(3),
-        add_path_comments: true,
-        max_file_size: 128 * 1024, // 128KB limit
         inline_contents: true,
         ..TemplateConfig::default()
     };
@@ -154,7 +147,6 @@ Common errors and solutions:
 |-------|-------|----------|
 | `File not found` | Reference to non-existent file | Check file path and spelling |
 | `Directory not found` | Reference to non-existent directory | Verify directory exists |
-| `File size exceeds limit` | File larger than 64KB | Use `@!filename` to force |
 | `Path traversal detected` | Trying to access outside base dir | Use only relative paths |
 | `Invalid reference format` | Malformed template syntax | Check `{{ @... }}` format |
 

@@ -1,14 +1,17 @@
+#![warn(clippy::pedantic)]
+#![warn(clippy::nursery)]
+#![warn(clippy::all)]
 //! # textcon
 //!
 //! A template processing library and CLI tool for expanding file and directory references
 //! in text templates. Designed to prepare content for Large Language Models (LLMs) by
-//! embedding file contents and directory structures directly into templates.
+//! embedding file contents and directory content directly into templates.
 //!
 //! ## Features
 //!
 //! - Process templates containing `{{ @file.txt }}` references
 //! - Expand file contents inline
-//! - Generate directory tree representations
+//! - Recursive directory stitching (concatenation)
 //! - Security: prevents path traversal attacks
 //! - Flexible configuration options
 //!

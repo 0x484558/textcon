@@ -54,7 +54,7 @@ jobs:
         if: matrix.rust == 'stable'
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -W clippy::pedantic -W clippy::nursery -W clippy::all -D warnings
         if: matrix.rust == 'stable'
 
       - name: Build

@@ -8,7 +8,7 @@ use textcon::{Result, TemplateConfig, find_references, process_template};
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const NAME: &str = env!("CARGO_PKG_NAME");
 
-const LONG_HELP: &str = r#"
+const LONG_HELP: &str = r"
 Examples:
 # Stitch files together
 textcon src/main.rs src/lib.rs
@@ -32,22 +32,17 @@ textcon src/main.rs src/lib.rs
 Template example:
   # My Project
   {{ @README.md }}
-  # Structure
-  {{ @. }}
+
   # All Source Code
-  {{ @!src/ }}
-  # Logs (force include even if large)
-  {{ @!logs/pod.log }}
+  {{ @src/ }}
 
 Reference:
-  {{ @file.txt }}      - Include file contents (max 64KB)
-  {{ @!file.txt }}     - Force include large file (>64KB)
-  {{ @dirname/ }}      - Include directory tree
-  {{ @!dirname/ }}     - Include tree AND all file contents
-  {{ @. }} OR {{ @/ }} - Include tree of current directory
+  {{ @file.txt }}      - Include file contents
+  {{ @dirname/ }}      - Include file contents of all files in directory
+  {{ @. }} OR {{ @/ }} - Include contents of current directory
 
 For more information, visit: https://github.com/0x484558/textcon
-"#;
+";
 
 /// Text concatenation for LLM context building.
 ///
@@ -79,13 +74,9 @@ struct Cli {
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
 
-    /// Maximum depth for directory tree generation
+    /// Maximum depth for directory recursion
     #[arg(short = 'd', long, value_name = "DEPTH", default_value = "5")]
     max_depth: Option<usize>,
-
-    /// Don't add file path comments
-    #[arg(long)]
-    no_comments: bool,
 
     /// Perform a dry run - validate references without processing
     #[arg(long, conflicts_with = "list")]
@@ -141,7 +132,6 @@ struct ReferenceInfo {
     reference: String,
     start: usize,
     end: usize,
-    force: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,14 +164,9 @@ fn main() {
     };
 
     let result = if cli.dry_run {
-        dry_run(&template_content, cli.base_dir.clone(), log_level)
+        dry_run(&template_content, cli.base_dir, log_level)
     } else if let Some(list_format) = cli.list {
-        list_references(
-            &template_content,
-            list_format,
-            cli.base_dir.clone(),
-            log_level,
-        )
+        list_references(&template_content, list_format, cli.base_dir, log_level)
     } else {
         // Build TemplateConfig from CLI options
         let mut config = TemplateConfig::default();
@@ -190,13 +175,12 @@ fn main() {
         config.base_dir = match raw_base_dir.canonicalize() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("Warning: Failed to canonicalize base directory: {}", e);
+                eprintln!("Warning: Failed to canonicalize base directory: {e}");
                 // Fallback to raw path, though traversal checks might fail later
                 raw_base_dir
             }
         };
         config.max_tree_depth = cli.max_depth;
-        config.add_path_comments = !cli.no_comments;
         config.use_gitignore = !cli.no_gitignore;
         if !cli.exclude.is_empty() {
             let mut builder = ignore::overrides::OverrideBuilder::new(&config.base_dir);
@@ -204,11 +188,9 @@ fn main() {
                 // ignore crate uses "!" for whitelist.
                 // "target" is to be IGNORED, so pass "!target".
                 // "!target" is to be INCLUDED, so pass "target".
-                let adjusted_pat = if let Some(stripped) = pat.strip_prefix('!') {
-                    stripped.to_string()
-                } else {
-                    format!("!{}", pat)
-                };
+                let adjusted_pat = pat
+                    .strip_prefix('!')
+                    .map_or_else(|| format!("!{pat}"), std::string::ToString::to_string);
                 match builder.add(&adjusted_pat) {
                     Ok(_) => {}
                     Err(e) => {
@@ -268,15 +250,48 @@ fn get_template_content(cli: &Cli, log_level: LogLevel) -> Result<String> {
             "Synthesizing template from inputs...",
         );
         let mut template = String::new();
+        let mut add_file_entry = |path_str: std::borrow::Cow<'_, str>| {
+            use std::fmt::Write as _;
+            write!(
+                template,
+                "## {path_str}\n\n```\n{{{{ @{path_str} }}}}\n```\n\n"
+            )
+            .unwrap();
+        };
+
         for input in &cli.inputs {
-            // Append trailing slash for directories to improve clarity in the synthesized template
-            let input_str = input.to_string_lossy();
-            let ref_str = if input.is_dir() {
-                format!("{{{{ @!{}/ }}}}\n", input_str)
+            if input.is_dir() {
+                // Recurse through directories to add each file with its own header and code block
+                let walker = walkdir::WalkDir::new(input)
+                    .max_depth(cli.max_depth.unwrap_or(usize::MAX))
+                    .follow_links(true);
+
+                for entry in walker {
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(e) => {
+                            eprintln!("Warning: Failed to access entry: {e}");
+                            continue;
+                        }
+                    };
+
+                    let path = entry.path();
+                    if path.is_file() {
+                        // Skip hidden files
+                        if let Some(name) = path.file_name()
+                            && let Some(name_str) = name.to_str()
+                            && name_str.starts_with('.')
+                        {
+                            continue;
+                        }
+
+                        add_file_entry(path.to_string_lossy());
+                    }
+                }
             } else {
-                format!("{{{{ @!{} }}}}\n", input_str)
-            };
-            template.push_str(&ref_str);
+                // Individual files also get headers and code blocks in stitching mode
+                add_file_entry(input.to_string_lossy());
+            }
         }
         Ok(template)
     }
@@ -410,7 +425,6 @@ fn list_references(
             for reference in &references {
                 println!("Reference: {}", reference.reference);
                 println!("  Position: {}..{}", reference.start, reference.end);
-                println!("  Force: {}", if reference.force { "yes" } else { "no" });
 
                 match textcon::fs_utils::resolve_reference_path(&reference.reference, &base) {
                     Ok(p) => {
@@ -441,7 +455,6 @@ fn list_references(
                     reference: reference.reference.clone(),
                     start: reference.start,
                     end: reference.end,
-                    force: reference.force,
                     path: None,
                     exists: None,
                     file_type: None,

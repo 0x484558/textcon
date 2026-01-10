@@ -1,27 +1,19 @@
 use crate::error::{Result, TextconError};
-use crate::fs_utils::{generate_directory_tree, read_file_contents, resolve_reference_path};
+use crate::fs_utils::{read_file_contents, resolve_reference_path};
 
 use regex::Regex;
-use std::fmt::Write;
-use std::fs;
-use std::path::Path;
 
-/// Maximum file size (64KB) before requiring force syntax
-pub const MAX_FILE_SIZE: u64 = 64 * 1024;
+use std::path::Path;
 
 /// Configuration for template processing
 #[derive(Debug, Clone)]
 pub struct TemplateConfig {
     /// Base directory for resolving references (usually current working directory)
     pub base_dir: std::path::PathBuf,
-    /// Maximum depth for directory tree generation
+    /// Maximum depth for directory recursion
     pub max_tree_depth: Option<usize>,
     /// Whether to include file contents inline
     pub inline_contents: bool,
-    /// Whether to add file path comments
-    pub add_path_comments: bool,
-    /// Maximum file size before requiring force syntax
-    pub max_file_size: u64,
     /// Optional overrides for file exclusion (ripgrep semantics)
     pub overrides: Option<ignore::overrides::Override>,
     /// Whether to respect .gitignore files
@@ -34,8 +26,6 @@ impl Default for TemplateConfig {
             base_dir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             max_tree_depth: Some(5),
             inline_contents: true,
-            add_path_comments: true,
-            max_file_size: MAX_FILE_SIZE,
             overrides: None,
             use_gitignore: true,
         }
@@ -43,18 +33,16 @@ impl Default for TemplateConfig {
 }
 
 /// Represents a reference found in a template
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateReference {
     /// The full match including {{ and }}
     pub full_match: String,
-    /// The reference content (e.g., "@file.txt" or "@!large.txt")
+    /// The reference content (e.g., "@file.txt")
     pub reference: String,
     /// Starting position in the template
     pub start: usize,
     /// Ending position in the template
     pub end: usize,
-    /// Whether this is a forced inclusion (using @! prefix)
-    pub force: bool,
 }
 
 /// Finds all template references in the given text
@@ -63,7 +51,8 @@ pub struct TemplateReference {
 ///
 /// Returns `TextconError::Regex` if there's an error compiling the regex pattern.
 pub fn find_references(template: &str) -> Result<Vec<TemplateReference>> {
-    let pattern = Regex::new(r"\{\{\s*(@!?[^}]+?)\s*\}\}")?;
+    // Modified regex: no longer looks for '!' specifically
+    let pattern = Regex::new(r"\{\{\s*(@[^}]+?)\s*\}\}")?;
     let mut references = Vec::new();
 
     for capture in pattern.captures_iter(template) {
@@ -71,14 +60,12 @@ pub fn find_references(template: &str) -> Result<Vec<TemplateReference>> {
             && let Some(ref_match) = capture.get(1)
         {
             let reference_str = ref_match.as_str();
-            let force = reference_str.starts_with("@!");
 
             references.push(TemplateReference {
                 full_match: full_match.as_str().to_string(),
                 reference: reference_str.to_string(),
                 start: full_match.start(),
                 end: full_match.end(),
-                force,
             });
         }
     }
@@ -92,9 +79,8 @@ pub fn find_references(template: &str) -> Result<Vec<TemplateReference>> {
 ///
 /// - `TextconError::InvalidReference` if the reference format is invalid.
 /// - `TextconError::FileNotFound` or `TextconError::DirectoryNotFound` if the referenced path doesn't exist.
-/// - `TextconError::FileSizeExceeded` if a file exceeds size limits without force flag.
 /// - Other errors from file system operations or path resolution.
-pub fn process_reference(reference: &str, config: &TemplateConfig, force: bool) -> Result<String> {
+pub fn process_reference(reference: &str, config: &TemplateConfig) -> Result<String> {
     // Validate reference format
     if !reference.starts_with('@') {
         return Err(TextconError::InvalidReference {
@@ -102,27 +88,17 @@ pub fn process_reference(reference: &str, config: &TemplateConfig, force: bool) 
         });
     }
 
-    // Remove @! or @ prefix
-    let clean_ref = if let Some(stripped) = reference.strip_prefix("@!") {
-        stripped
-    } else {
-        &reference[1..]
-    };
+    // Remove @ prefix
+    let clean_ref = &reference[1..];
 
-    // Resolve the path (use clean reference without @ or @!)
-    let path = resolve_reference_path(&format!("@{clean_ref}"), &config.base_dir)?;
+    // Resolve the path
+    let path = resolve_reference_path(reference, &config.base_dir)?;
 
     // Check if it's a directory or file
     if path.is_dir() {
-        if force {
-            // For @!dir/, include tree AND all file contents
-            process_directory_deep(&path, config)
-        } else {
-            // For @dir/, just include tree
-            process_directory_reference(&path, config)
-        }
+        process_directory(&path, config)
     } else if path.is_file() {
-        process_file_reference(&path, config, force)
+        read_file_contents(&path)
     } else {
         // Try to determine if user meant a directory by checking for trailing slash or special refs
         if clean_ref.ends_with('/') || clean_ref == "." || clean_ref == "/" || clean_ref.is_empty()
@@ -134,80 +110,11 @@ pub fn process_reference(reference: &str, config: &TemplateConfig, force: bool) 
     }
 }
 
-/// Processes a file reference with size checking
-fn process_file_reference(path: &Path, config: &TemplateConfig, force: bool) -> Result<String> {
-    // Check file size
-    let metadata = fs::metadata(path)?;
-    let size = metadata.len();
-
-    if !force && size > config.max_file_size {
-        return Err(TextconError::FileSizeExceeded {
-            path: path.to_path_buf(),
-            size,
-            max_size: config.max_file_size,
-        });
-    }
-
-    let contents = read_file_contents(path)?;
-
-    if config.add_path_comments {
-        let path_str = path
-            .strip_prefix(&config.base_dir)
-            .unwrap_or(path)
-            .display()
-            .to_string();
-
-        Ok(format!("<!-- File: {path_str} -->\n{contents}"))
-    } else {
-        Ok(contents)
-    }
-}
-
-/// Processes a directory reference (tree only)
-fn process_directory_reference(path: &Path, config: &TemplateConfig) -> Result<String> {
-    let tree = generate_directory_tree(
-        path,
-        config.max_tree_depth,
-        config.overrides.as_ref(), // Pass the simplified override
-        config.use_gitignore,
-    )?;
-
-    if config.add_path_comments {
-        let path_str = path
-            .strip_prefix(&config.base_dir)
-            .unwrap_or(path)
-            .display()
-            .to_string();
-
-        Ok(format!(
-            "<!-- Directory tree: {} -->\n{}",
-            if path_str.is_empty() { "." } else { &path_str },
-            tree
-        ))
-    } else {
-        Ok(tree)
-    }
-}
-
-/// Processes a deep directory reference (tree + all file contents)
-fn process_directory_deep(path: &Path, config: &TemplateConfig) -> Result<String> {
+/// Processes a directory reference (concatenates files)
+fn process_directory(path: &Path, config: &TemplateConfig) -> Result<String> {
     let mut result = String::new();
 
-    // First add the tree
-    result.push_str(&process_directory_reference(path, config)?);
-    result.push('\n');
-
-    // Then add all file contents
     let walker = walkdir::WalkDir::new(path).max_depth(config.max_tree_depth.unwrap_or(usize::MAX));
-
-    let base_path = path
-        .strip_prefix(&config.base_dir)
-        .unwrap_or(path)
-        .display();
-
-    if config.add_path_comments {
-        writeln!(result, "<!-- Files in {base_path} -->\n").unwrap();
-    }
 
     for entry in walker {
         let entry = entry?;
@@ -222,30 +129,13 @@ fn process_directory_deep(path: &Path, config: &TemplateConfig) -> Result<String
                 continue;
             }
 
-            // Get relative path for display
-            let relative_path = entry_path
-                .strip_prefix(&config.base_dir)
-                .unwrap_or(entry_path)
-                .display();
-
-            // Read file contents (force=true to bypass size limits for deep directory inclusion)
-            match process_file_reference(entry_path, config, true) {
+            // Read file contents
+            match read_file_contents(entry_path) {
                 Ok(contents) => {
-                    let cleaned_contents = contents
-                        .lines()
-                        .skip_while(|line| line.starts_with("<!--"))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    writeln!(
-                        result,
-                        "## {relative_path}\n\n```\n{cleaned_contents}\n```\n"
-                    )
-                    .unwrap();
+                    result.push_str(&contents);
+                    result.push('\n');
                 }
-                Err(e) => {
-                    // Log error but continue with other files
-                    writeln!(result, "## {relative_path}\n\nError reading file: {e}\n").unwrap();
-                }
+                Err(e) => return Err(e),
             }
         }
     }
@@ -265,7 +155,7 @@ pub fn process_template(template: &str, config: &TemplateConfig) -> Result<Strin
     // Process from end to beginning to maintain correct positions
     let mut result = template.to_string();
     for reference in references.iter().rev() {
-        let replacement = process_reference(&reference.reference, config, reference.force)?;
+        let replacement = process_reference(&reference.reference, config)?;
         result.replace_range(reference.start..reference.end, &replacement);
     }
 
@@ -295,8 +185,6 @@ mod tests {
             base_dir: temp_dir.path().to_path_buf(),
             max_tree_depth: Some(3),
             inline_contents: true,
-            add_path_comments: true,
-            max_file_size: 100, // Small size for testing
             overrides: None,
             use_gitignore: false,
         };
@@ -309,51 +197,25 @@ mod tests {
         let refs = find_references(template).unwrap();
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].reference, "@file.txt");
-        assert!(!refs[0].force);
         assert_eq!(refs[1].reference, "@/dir/");
-        assert!(!refs[1].force);
-    }
-
-    #[test]
-    fn test_find_references_with_force() {
-        let template = "{{ @!large.txt }} and {{ @!dir/ }}";
-        let refs = find_references(template).unwrap();
-        assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].reference, "@!large.txt");
-        assert!(refs[0].force);
-        assert_eq!(refs[1].reference, "@!dir/");
-        assert!(refs[1].force);
-    }
-
-    #[test]
-    fn test_find_references_mixed() {
-        let template = "{{ @normal.txt }} {{ @!forced.txt }}";
-        let refs = find_references(template).unwrap();
-        assert_eq!(refs.len(), 2);
-        assert!(!refs[0].force);
-        assert!(refs[1].force);
     }
 
     #[test]
     fn test_find_references_with_spaces() {
-        let template = "{{  @file.txt  }} {{   @!large.txt   }}";
+        let template = "{{  @file.txt  }} {{   @large.txt   }}";
         let refs = find_references(template).unwrap();
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].reference, "@file.txt");
-        assert!(!refs[0].force);
-        assert_eq!(refs[1].reference, "@!large.txt");
-        assert!(refs[1].force);
+        assert_eq!(refs[1].reference, "@large.txt");
     }
 
     #[test]
     fn test_find_references_special_paths() {
-        let template = "{{ @. }} {{ @!. }} {{ @/ }} {{ @!/ }}";
+        let template = "{{ @. }} {{ @/ }}";
         let refs = find_references(template).unwrap();
-        assert_eq!(refs.len(), 4);
+        assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].reference, "@.");
-        assert!(!refs[0].force);
-        assert_eq!(refs[1].reference, "@!.");
-        assert!(refs[1].force);
+        assert_eq!(refs[1].reference, "@/");
     }
 
     #[test]
@@ -386,27 +248,23 @@ mod tests {
     }
 
     #[test]
-    fn test_file_size_check() {
-        let (temp_dir, config) = create_test_env();
+    fn test_file_processing() {
+        let (temp_dir, _config) = create_test_env();
 
-        // Create a small file
+        // Create a file
         let small_file = temp_dir.path().join("small.txt");
         fs::write(&small_file, "small content").unwrap();
 
         // Should succeed
-        let result = process_file_reference(&small_file, &config, false);
+        let result = read_file_contents(&small_file);
         assert!(result.is_ok());
 
         // Create a large file
         let large_file = temp_dir.path().join("large.txt");
         fs::write(&large_file, "x".repeat(200)).unwrap();
 
-        // Should fail without force
-        let result = process_file_reference(&large_file, &config, false);
-        assert!(matches!(result, Err(TextconError::FileSizeExceeded { .. })));
-
-        // Should succeed with force
-        let result = process_file_reference(&large_file, &config, true);
+        // Should resolve happily no matter the size
+        let result = read_file_contents(&large_file);
         assert!(result.is_ok());
     }
 
@@ -415,7 +273,7 @@ mod tests {
         let (_, config) = create_test_env();
 
         // Missing @ prefix
-        let result = process_reference("file.txt", &config, false);
+        let result = process_reference("file.txt", &config);
         assert!(matches!(result, Err(TextconError::InvalidReference { .. })));
     }
 
@@ -425,19 +283,14 @@ mod tests {
 
         // Create a reference to nonexistent file
         // The path resolution succeeds but the file check fails
-        let result = process_reference("@nonexistent.txt", &config, false);
+        let result = process_reference("@nonexistent.txt", &config);
         // This should fail when trying to check if it's a file or directory
-        assert!(result.is_err());
-
-        // Nonexistent directory with trailing slash
-        let result = process_reference("@nonexistent/", &config, false);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_process_template_integration() {
-        let (temp_dir, mut config) = create_test_env();
-        config.max_file_size = 100;
+        let (temp_dir, config) = create_test_env();
 
         // Create test files
         let file1 = temp_dir.path().join("file1.txt");
@@ -452,24 +305,19 @@ mod tests {
         let subfile = dir.join("subfile.txt");
         fs::write(&subfile, "subcontent").unwrap();
 
-        // Test template with mixed references
+        // Test template with references
         let template =
-            "Start\n{{ @file1.txt }}\nMiddle\n{{ @!file2.txt }}\nDir:\n{{ @testdir/ }}\nEnd";
+            "Start\n{{ @file1.txt }}\nMiddle\n{{ @file2.txt }}\nDir:\n{{ @testdir/ }}\nEnd";
         let result = process_template(template, &config);
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.contains("content1"));
         assert!(output.contains("xxx")); // From large file
-        assert!(output.contains("testdir"));
-
-        // Test template that should fail (large file without force)
-        let template_fail = "{{ @file2.txt }}";
-        let result = process_template(template_fail, &config);
-        assert!(matches!(result, Err(TextconError::FileSizeExceeded { .. })));
+        assert!(output.contains("subcontent")); // From directory stitching
     }
 
     #[test]
-    fn test_deep_directory_inclusion() {
+    fn test_directory_inclusion() {
         let (temp_dir, config) = create_test_env();
 
         // Create test directory structure
@@ -485,19 +333,14 @@ mod tests {
         let file2 = subdir.join("file2.txt");
         fs::write(&file2, "file2 content").unwrap();
 
-        // Test normal directory reference (tree only)
-        let result = process_reference("@project/", &config, false).unwrap();
-        assert!(result.contains("project"));
-        assert!(result.contains("file1.txt"));
-        assert!(result.contains("subdir"));
-        assert!(!result.contains("file1 content")); // Should NOT include contents
+        // Test directory reference (file stitching only, no tree)
+        let result = process_reference("@project/", &config).unwrap();
+        // Should contain file contents
+        assert!(result.contains("file1 content"));
+        assert!(result.contains("file2 content"));
 
-        // Test forced directory reference (tree + contents)
-        let result = process_reference("@!project/", &config, true).unwrap();
-        assert!(result.contains("project"));
-        assert!(result.contains("file1.txt"));
-        assert!(result.contains("file1 content")); // Should include contents
-        assert!(result.contains("file2 content")); // Should include nested file contents
+        // Should likely NOT contain ASCII tree characters
+        assert!(!result.contains("├──"));
     }
 
     #[test]
@@ -509,84 +352,17 @@ mod tests {
         fs::write(&file, "test content").unwrap();
 
         // Test @. reference
-        let result = process_reference("@.", &config, false);
+        let result = process_reference("@.", &config);
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("test.txt"));
-
-        // Test @!. reference (deep)
-        let result = process_reference("@!.", &config, true);
-        assert!(result.is_ok());
-        let output = result.unwrap();
-        assert!(output.contains("test.txt"));
-        assert!(output.contains("test content"));
-
-        // Test @/ reference (equivalent to @.)
-        let result = process_reference("@/", &config, false);
-        assert!(result.is_ok());
+        assert!(result.unwrap().contains("test content"));
     }
 
-    #[test]
-    fn test_process_directory_reference_with_exclusions() {
-        let (temp_dir, mut config) = create_test_env();
-        config.base_dir = temp_dir.path().canonicalize().unwrap();
-
-        // Create directories and files
-        let node_modules = temp_dir.path().join("node_modules");
-        fs::create_dir(&node_modules).unwrap();
-        fs::write(node_modules.join("lib.js"), "ignored").unwrap();
-
-        let target = temp_dir.path().join("target");
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("build.o"), "ignored").unwrap();
-
-        let src = temp_dir.path().join("src");
-        fs::create_dir(&src).unwrap();
-        fs::write(src.join("main.rs"), "fn main() {}").unwrap();
-
-        fs::write(temp_dir.path().join("app.log"), "should be excluded").unwrap();
-
-        // Build exclusion set
-
-        let mut builder = ignore::overrides::OverrideBuilder::new(&config.base_dir);
-        builder.add("!node_modules/**").unwrap();
-        builder.add("!target/**").unwrap();
-        builder.add("!*.log").unwrap();
-        let set = builder.build().unwrap();
-        config.overrides = Some(set);
-
-        // Generate tree for current directory
-        let output = process_reference("@.", &config, false).unwrap();
-
-        // Excluded entries should not appear
-        assert!(output.contains("node_modules/")); // Directory itself is visible
-        assert!(!output.contains("lib.js")); // Contents are hidden
-        assert!(output.contains("target/")); // Directory itself is visible
-        assert!(!output.contains("build.o")); // Contents are hidden
-        assert!(!output.contains("app.log"));
-        // Non-excluded should appear
-        assert!(output.contains("src/"));
-        assert!(output.contains("main.rs"));
-    }
-
+    /*
     #[test]
     fn test_path_comments_config() {
-        let (temp_dir, mut config) = create_test_env();
-
-        let file = temp_dir.path().join("test.txt");
-        fs::write(&file, "content").unwrap();
-
-        // With comments
-        config.add_path_comments = true;
-        let result = process_file_reference(&file, &config, false).unwrap();
-        assert!(result.contains("<!-- File:"));
-        assert!(result.contains("content"));
-
-        // Without comments
-        config.add_path_comments = false;
-        let result = process_file_reference(&file, &config, false).unwrap();
-        assert!(!result.contains("<!--"));
-        assert_eq!(result, "content");
+        // Removed as functionality is removed
     }
+    */
 
     #[test]
     fn test_template_reference_equality() {
@@ -595,7 +371,6 @@ mod tests {
             reference: "@file.txt".to_string(),
             start: 0,
             end: 15,
-            force: false,
         };
 
         let ref2 = TemplateReference {
@@ -603,19 +378,9 @@ mod tests {
             reference: "@file.txt".to_string(),
             start: 0,
             end: 15,
-            force: false,
-        };
-
-        let ref3 = TemplateReference {
-            full_match: "{{ @!file.txt }}".to_string(),
-            reference: "@!file.txt".to_string(),
-            start: 0,
-            end: 16,
-            force: true,
         };
 
         assert_eq!(ref1, ref2);
-        assert_ne!(ref1, ref3);
     }
 
     #[test]
@@ -623,8 +388,7 @@ mod tests {
         let config = TemplateConfig::default();
         assert_eq!(config.max_tree_depth, Some(5));
         assert!(config.inline_contents);
-        assert!(config.add_path_comments);
-        assert_eq!(config.max_file_size, MAX_FILE_SIZE);
+        // assert!(config.add_path_comments); // Field removed
         assert!(config.use_gitignore);
     }
 
@@ -640,42 +404,9 @@ mod tests {
         let normal = temp_dir.path().join("normal.txt");
         fs::write(&normal, "normal content").unwrap();
 
-        // Tree should not show hidden file
-        let result = process_reference("@.", &config, false).unwrap();
-        assert!(result.contains("normal.txt"));
-        assert!(!result.contains(".hidden"));
-
-        // Deep inclusion should also skip hidden files
-        let result = process_reference("@!.", &config, true).unwrap();
+        // Should skip hidden files
+        let result = process_reference("@.", &config).unwrap();
         assert!(result.contains("normal content"));
         assert!(!result.contains("hidden content"));
-    }
-
-    #[test]
-    fn test_process_template_empty() {
-        let (_, config) = create_test_env();
-
-        let result = process_template("", &config).unwrap();
-        assert_eq!(result, "");
-
-        let result = process_template("No references", &config).unwrap();
-        assert_eq!(result, "No references");
-    }
-
-    #[test]
-    fn test_process_template_position_preservation() {
-        let (temp_dir, config) = create_test_env();
-
-        let file = temp_dir.path().join("test.txt");
-        fs::write(&file, "TEST").unwrap();
-
-        let template = "A{{ @test.txt }}B{{ @test.txt }}C";
-        let result = process_template(template, &config).unwrap();
-
-        // Check that positions are preserved
-        assert!(result.starts_with('A'));
-        assert!(result.contains('B'));
-        assert!(result.ends_with('C'));
-        assert_eq!(result.matches("TEST").count(), 2);
     }
 }

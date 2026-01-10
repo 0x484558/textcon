@@ -47,7 +47,7 @@ jobs:
 
             ### Windows
 
-            Download the Windows executable and add it to your PATH.
+            Download the Windows executable and add it to a directory listed in your PATH environment variable.
 
             ### From source
             ```bash
