@@ -1,6 +1,6 @@
 use crate::error::{Result, TextconError};
 use crate::fs_utils::{generate_directory_tree, read_file_contents, resolve_reference_path};
-use globset::GlobSet;
+
 use regex::Regex;
 use std::fmt::Write;
 use std::fs;
@@ -22,8 +22,8 @@ pub struct TemplateConfig {
     pub add_path_comments: bool,
     /// Maximum file size before requiring force syntax
     pub max_file_size: u64,
-    /// Optional glob patterns to exclude (relative to `base_dir`)
-    pub exclude: Option<GlobSet>,
+    /// Optional overrides for file exclusion (ripgrep semantics)
+    pub overrides: Option<ignore::overrides::Override>,
     /// Whether to respect .gitignore files
     pub use_gitignore: bool,
 }
@@ -36,7 +36,7 @@ impl Default for TemplateConfig {
             inline_contents: true,
             add_path_comments: true,
             max_file_size: MAX_FILE_SIZE,
-            exclude: None,
+            overrides: None,
             use_gitignore: true,
         }
     }
@@ -168,8 +168,7 @@ fn process_directory_reference(path: &Path, config: &TemplateConfig) -> Result<S
     let tree = generate_directory_tree(
         path,
         config.max_tree_depth,
-        config.exclude.as_ref(),
-        &config.base_dir,
+        config.overrides.as_ref(), // Pass the simplified override
         config.use_gitignore,
     )?;
 
@@ -239,13 +238,13 @@ fn process_directory_deep(path: &Path, config: &TemplateConfig) -> Result<String
                         .join("\n");
                     writeln!(
                         result,
-                        "### {relative_path}\n\n```\n{cleaned_contents}\n```\n"
+                        "## {relative_path}\n\n```\n{cleaned_contents}\n```\n"
                     )
                     .unwrap();
                 }
                 Err(e) => {
                     // Log error but continue with other files
-                    writeln!(result, "### {relative_path}\n\nError reading file: {e}\n").unwrap();
+                    writeln!(result, "## {relative_path}\n\nError reading file: {e}\n").unwrap();
                 }
             }
         }
@@ -285,10 +284,6 @@ pub fn process_template_file(template_path: &Path, config: &TemplateConfig) -> R
 }
 
 #[cfg(test)]
-#[allow(unused)]
-const _: () = {};
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
@@ -302,7 +297,7 @@ mod tests {
             inline_contents: true,
             add_path_comments: true,
             max_file_size: 100, // Small size for testing
-            exclude: None,
+            overrides: None,
             use_gitignore: false,
         };
         (temp_dir, config)
@@ -533,6 +528,7 @@ mod tests {
     #[test]
     fn test_process_directory_reference_with_exclusions() {
         let (temp_dir, mut config) = create_test_env();
+        config.base_dir = temp_dir.path().canonicalize().unwrap();
 
         // Create directories and files
         let node_modules = temp_dir.path().join("node_modules");
@@ -550,19 +546,22 @@ mod tests {
         fs::write(temp_dir.path().join("app.log"), "should be excluded").unwrap();
 
         // Build exclusion set
-        let mut builder = globset::GlobSetBuilder::new();
-        builder.add(globset::Glob::new("node_modules/**").unwrap());
-        builder.add(globset::Glob::new("target/**").unwrap());
-        builder.add(globset::Glob::new("*.log").unwrap());
+
+        let mut builder = ignore::overrides::OverrideBuilder::new(&config.base_dir);
+        builder.add("!node_modules/**").unwrap();
+        builder.add("!target/**").unwrap();
+        builder.add("!*.log").unwrap();
         let set = builder.build().unwrap();
-        config.exclude = Some(set);
+        config.overrides = Some(set);
 
         // Generate tree for current directory
         let output = process_reference("@.", &config, false).unwrap();
 
         // Excluded entries should not appear
-        assert!(!output.contains("node_modules"));
-        assert!(!output.contains("target"));
+        assert!(output.contains("node_modules/")); // Directory itself is visible
+        assert!(!output.contains("lib.js")); // Contents are hidden
+        assert!(output.contains("target/")); // Directory itself is visible
+        assert!(!output.contains("build.o")); // Contents are hidden
         assert!(!output.contains("app.log"));
         // Non-excluded should appear
         assert!(output.contains("src/"));

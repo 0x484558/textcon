@@ -1,25 +1,21 @@
 use clap::{Parser, ValueEnum};
-use globset::{Glob, GlobSetBuilder};
+
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use textcon::{Result, TemplateConfig, TextconError, find_references, process_template};
+use textcon::{Result, TemplateConfig, find_references, process_template};
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const NAME: &str = env!("CARGO_PKG_NAME");
 
 const LONG_HELP: &str = r#"
-Reference:
-  {{ @file.txt }}      - Include file contents (max 64KB)
-  {{ @!file.txt }}     - Force include large file (>64KB)
-  {{ @dirname/ }}      - Include directory tree
-  {{ @!dirname/ }}     - Include tree AND all file contents
-  {{ @. }} OR {{ @/ }} - Include tree of current directory
-
 Examples:
+# Stitch files together
+textcon src/main.rs src/lib.rs
   # Process a template file
   textcon --template template.txt
-  # Stitch files together
-  textcon src/main.rs src/lib.rs
   # Process from stdin
-  echo "Code: {{ @main.rs }}" | textcon --template -
+  echo 'Code: {{ @main.rs }}' | textcon --template -
   # Check what would be included (dry run)
   textcon --template template.txt --dry-run
   # List all references in template
@@ -36,13 +32,19 @@ Examples:
 Template example:
   # My Project
   {{ @README.md }}
-  ## Structure
+  # Structure
   {{ @. }}
-  ## All Source Code
+  # All Source Code
   {{ @!src/ }}
-  ## Logs (force include even if large)
+  # Logs (force include even if large)
   {{ @!logs/pod.log }}
 
+Reference:
+  {{ @file.txt }}      - Include file contents (max 64KB)
+  {{ @!file.txt }}     - Force include large file (>64KB)
+  {{ @dirname/ }}      - Include directory tree
+  {{ @!dirname/ }}     - Include tree AND all file contents
+  {{ @. }} OR {{ @/ }} - Include tree of current directory
 
 For more information, visit: https://github.com/0x484558/textcon
 "#;
@@ -183,34 +185,45 @@ fn main() {
     } else {
         // Build TemplateConfig from CLI options
         let mut config = TemplateConfig::default();
-        if let Some(dir) = cli.base_dir.clone() {
-            config.base_dir = dir
-                .canonicalize()
-                .map_err(TextconError::Io)
-                .unwrap_or(config.base_dir);
-        }
+        // Always canonicalize base_dir to match resolve_reference_path behavior (handling \\?\ on Windows)
+        let raw_base_dir = cli.base_dir.clone().unwrap_or(config.base_dir);
+        config.base_dir = match raw_base_dir.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Warning: Failed to canonicalize base directory: {}", e);
+                // Fallback to raw path, though traversal checks might fail later
+                raw_base_dir
+            }
+        };
         config.max_tree_depth = cli.max_depth;
         config.add_path_comments = !cli.no_comments;
         config.use_gitignore = !cli.no_gitignore;
         if !cli.exclude.is_empty() {
-            let mut builder = GlobSetBuilder::new();
+            let mut builder = ignore::overrides::OverrideBuilder::new(&config.base_dir);
             for pat in &cli.exclude {
-                match Glob::new(pat) {
-                    Ok(g) => {
-                        builder.add(g);
-                    }
+                // ignore crate uses "!" for whitelist.
+                // "target" is to be IGNORED, so pass "!target".
+                // "!target" is to be INCLUDED, so pass "target".
+                let adjusted_pat = if let Some(stripped) = pat.strip_prefix('!') {
+                    stripped.to_string()
+                } else {
+                    format!("!{}", pat)
+                };
+                match builder.add(&adjusted_pat) {
+                    Ok(_) => {}
                     Err(e) => {
                         eprintln!("[ERROR] Invalid exclude pattern '{pat}': {e}");
                         std::process::exit(2);
                     }
                 }
             }
+
             match builder.build() {
-                Ok(set) => {
-                    config.exclude = Some(set);
+                Ok(ov) => {
+                    config.overrides = Some(ov);
                 }
                 Err(e) => {
-                    eprintln!("[ERROR] Failed to build exclude set: {e}");
+                    eprintln!("[ERROR] Failed to build exclude overrides: {e}");
                     std::process::exit(2);
                 }
             }
@@ -256,12 +269,7 @@ fn get_template_content(cli: &Cli, log_level: LogLevel) -> Result<String> {
         );
         let mut template = String::new();
         for input in &cli.inputs {
-            // For each input, we want to force include its content/tree
-            // If it's a dir, @!path/
-            // If it's a file, @!path
-            // We can just append @!path and let the engine resolve type,
-            // but adding trailing slash for dirs helps clarity if we can know it efficiently?
-            // Actually, metadata check is done in process_reference.
+            // Append trailing slash for directories to improve clarity in the synthesized template
             let input_str = input.to_string_lossy();
             let ref_str = if input.is_dir() {
                 format!("{{{{ @!{}/ }}}}\n", input_str)

@@ -51,6 +51,3 @@ pub use template::{
     TemplateConfig, TemplateReference, find_references, process_reference, process_template,
     process_template_file,
 };
-
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const NAME: &str = env!("CARGO_PKG_NAME");

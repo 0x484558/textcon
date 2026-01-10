@@ -49,9 +49,9 @@ pub enum TextconError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// Glob pattern compilation or build error
-    #[error("Glob error: {0}")]
-    Glob(#[from] globset::Error),
+    /// Ignore crate error
+    #[error("Ignore error: {0}")]
+    Ignore(#[from] ignore::Error),
 }
 
 pub type Result<T> = std::result::Result<T, TextconError>;
