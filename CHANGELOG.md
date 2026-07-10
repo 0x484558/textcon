@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-10
+
+### Changed
+
+- **BREAKING**: Replaced allocating template APIs with a payload-streaming `Engine`.
+- **BREAKING**: Direct inputs now use explicit Markdown or raw rendering without synthesizing template syntax.
+- **BREAKING**: Absolute template references retain operating-system semantics; confinement is now explicit with `--sandbox`.
+- Unified directory operands and directory references behind one deterministic gitignore/exclusion/depth/hidden selector.
+- Reduced diagnostics to standard exit statuses and one stderr error; downstream BrokenPipe is quiet success.
+
+### Added
+
+- Streaming `raw` and adaptive `markdown` reference processors.
+- Capability-based reference sandboxing.
+- Production `textcon(1)` man page and a source-only codebase-bundling agent skill.
+
+### Removed
+
+- Output-file, HTML, list, dry-run, verbosity, and custom logging surfaces.
+- Regex, whole-template replacement, JSON inspection, and duplicated `WalkDir` traversal.
+
 ## [0.2.0] - 2025-12-14
 
 ### Changed
@@ -30,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Path traversal protection prevents access outside base directory
 - Automatic filtering of hidden files and directories
 
-[Unreleased]: https://github.com/0x484558/textcon/compare/0.2.0...HEAD
+[Unreleased]: https://github.com/0x484558/textcon/compare/0.4.0...HEAD
+[0.4.0]: https://github.com/0x484558/textcon/compare/0.3.0...0.4.0
 [0.2.0]: https://github.com/0x484558/textcon/releases/tag/0.2.0
 [0.1.0]: https://github.com/0x484558/textcon/releases/tag/0.1.0

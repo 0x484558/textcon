@@ -4,171 +4,152 @@ on:
   push:
     tags:
       - '*.*.*'
-  workflow_dispatch:
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  create-release:
-    name: Create Release
+  validate:
+    name: Validate release metadata
     runs-on: ubuntu-latest
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      version: ${{ steps.get_version.outputs.version }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Get version from tag
-        id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-      
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ steps.get_version.outputs.version }}
-          draft: true
-          prerelease: false
-          body: |
-            Download the appropriate binary for your platform below and add it to your PATH.
+      - uses: dtolnay/rust-toolchain@stable
+      - id: version
+        name: Require tag and Cargo version equality
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [[ "${GITHUB_REF_NAME}" != "${version}" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo version ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: Verify package contents
+        shell: bash
+        run: |
+          cargo package --list --locked > package-files.txt
+          grep -qx 'docs/man/textcon.1' package-files.txt
+          grep -qx 'docs/man/textcon.1.scd' package-files.txt
+          if grep -q '^skills/' package-files.txt; then
+            echo 'source-only skill leaked into Cargo package' >&2
+            exit 1
+          fi
+      - name: Publish dry run
+        run: cargo publish --dry-run --locked
 
-            ### macOS/Linux
-
-            ```bash
-            # Download the binary (replace with your platform)
-            curl -L https://github.com/0x484558/textcon/releases/download/${{ steps.get_version.outputs.version }}/textcon-linux-x86_64.tar.gz | tar xz
-            chmod +x textcon
-            sudo mv textcon /usr/local/bin/
-            ```
-
-            ### Windows
-
-            Download the Windows executable and add it to a directory listed in your PATH environment variable.
-
-            ### From source
-            ```bash
-            cargo install textcon
-            ```
-
-            ## Changes
-
-            See [CHANGELOG.md](https://github.com/0x484558/textcon/blob/main/CHANGELOG.md) for details.
-
-  build-release:
-    name: Build Release
-    needs: create-release
+  build:
+    name: Build ${{ matrix.target }}
+    needs: validate
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          # Linux
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: textcon
-            asset_name: textcon-linux-x86_64
-            use_cross: false
-
+            binary: textcon
+            asset: textcon-linux-x86_64
+            cross: false
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            artifact_name: textcon
-            asset_name: textcon-linux-x86_64-musl
-            use_cross: true
-
+            binary: textcon
+            asset: textcon-linux-x86_64-musl
+            cross: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            artifact_name: textcon
-            asset_name: textcon-linux-aarch64
-            use_cross: true
-
-          # macOS
+            binary: textcon
+            asset: textcon-linux-aarch64
+            cross: true
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: textcon
-            asset_name: textcon-macos-x86_64
-            use_cross: false
-          
+            binary: textcon
+            asset: textcon-macos-x86_64
+            cross: false
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: textcon
-            asset_name: textcon-macos-aarch64
-            use_cross: false
-          
-          # Windows
+            binary: textcon
+            asset: textcon-macos-aarch64
+            cross: false
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: textcon.exe
-            asset_name: textcon-windows-x86_64
-            use_cross: false
-
+            binary: textcon.exe
+            asset: textcon-windows-x86_64
+            cross: false
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Install Cross
-        if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build
-        run: |
-          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
-            cross build --release --target ${{ matrix.target }}
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+      - name: Install reproducible archive tooling
+        if: runner.os == 'macOS'
+        run: brew install gnu-tar
+      - name: Build release binary
         shell: bash
-
-      - name: Package binary
         run: |
-          cd target/${{ matrix.target }}/release
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            7z a ../../../${{ matrix.asset_name }}.zip ${{ matrix.artifact_name }}
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            cross build --release --locked --target "${{ matrix.target }}"
           else
-            tar czf ../../../${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
+            cargo build --release --locked --target "${{ matrix.target }}"
           fi
-          cd -
+      - name: Stage release tree
         shell: bash
-
-      - name: Upload tarball
-        if: matrix.os != 'windows-latest'
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          root="textcon-${{ needs.validate.outputs.version }}-${{ matrix.target }}"
+          archive="${{ matrix.asset }}-${{ needs.validate.outputs.version }}"
+          mkdir -p "${root}/bin" "${root}/share/man/man1"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "${root}/bin/"
+          cp docs/man/textcon.1 "${root}/share/man/man1/"
+          cp README.md LICENSE "${root}/"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a "${archive}.zip" "${root}"
+            sha256sum "${archive}.zip" > "${archive}.zip.sha256"
+          else
+            tar_command=tar
+            if [[ "${{ runner.os }}" == "macOS" ]]; then tar_command=gtar; fi
+            "$tar_command" --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@$(git log -1 --format=%ct)" -cf - "${root}" \
+              | gzip -n > "${archive}.tar.gz"
+            shasum -a 256 "${archive}.tar.gz" > "${archive}.tar.gz.sha256"
+          fi
+      - uses: actions/upload-artifact@v4
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.asset_name }}.tar.gz
-          asset_name: ${{ matrix.asset_name }}.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload zip
-        if: matrix.os == 'windows-latest'
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.asset_name }}.zip
-          asset_name: ${{ matrix.asset_name }}.zip
-          asset_content_type: application/zip
+          name: ${{ matrix.asset }}-${{ needs.validate.outputs.version }}
+          path: |
+            ${{ matrix.asset }}-${{ needs.validate.outputs.version }}.tar.gz
+            ${{ matrix.asset }}-${{ needs.validate.outputs.version }}.tar.gz.sha256
+            ${{ matrix.asset }}-${{ needs.validate.outputs.version }}.zip
+            ${{ matrix.asset }}-${{ needs.validate.outputs.version }}.zip.sha256
+          if-no-files-found: ignore
 
   publish-crate:
-    name: Publish to crates.io
-    needs: build-release
+    name: Publish crate
+    needs: [validate, build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --locked --token "${{ secrets.CRATES_IO_TOKEN }}"
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }}
-        continue-on-error: true
+  release:
+    name: Create draft release
+    needs: [validate, build, publish-crate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: artifacts/*

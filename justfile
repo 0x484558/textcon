@@ -6,11 +6,11 @@ default:
 
 # Run tests
 test:
-  cargo test
+    cargo test --all-targets --all-features
 
 # Check code formatting
 fmt:
-  cargo fmt -- --check
+    cargo fmt --all -- --check
 
 # Fix code formatting
 fmt-fix:
@@ -22,7 +22,7 @@ clippy:
 
 # Run clippy with pedantic and strict settings
 clippy-pedantic:
-  cargo clippy -- -W clippy::pedantic -W clippy::nursery -W clippy::all -D warnings
+    cargo clippy --all-targets --all-features -- -W clippy::pedantic -W clippy::nursery -W clippy::all -D warnings
 
 # Build the project
 build:
@@ -30,7 +30,23 @@ build:
 
 # Build for release
 release:
-  cargo build --release
+    cargo build --release
 
-# Run all verification steps (fmt, clippy-pedantic, test)
-verify: fmt clippy-pedantic test
+# Regenerate the checked-in man page from its authoritative scdoc source
+man:
+    mkdir -p docs/man
+    SOURCE_DATE_EPOCH=1783641600 scdoc < docs/man/textcon.1.scd > docs/man/textcon.1
+
+# Prove the man page is current and valid
+man-check:
+    mkdir -p target/man
+    SOURCE_DATE_EPOCH=1783641600 scdoc < docs/man/textcon.1.scd > target/man/textcon.1
+    cmp docs/man/textcon.1 target/man/textcon.1
+    mandoc -Tascii docs/man/textcon.1 > /dev/null
+
+# Validate the source-only AI-agent skill and deterministic helper
+skill-check:
+    python3 -m unittest discover -s tests_py
+
+# Run all verification steps
+verify: fmt clippy-pedantic test man-check skill-check

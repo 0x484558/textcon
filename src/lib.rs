@@ -1,56 +1,16 @@
-#![warn(clippy::pedantic)]
-#![warn(clippy::nursery)]
-#![warn(clippy::all)]
-//! # textcon
+#![warn(clippy::all, clippy::nursery, clippy::pedantic)]
+//! Payload-streaming text composition and one-pass file-reference expansion.
 //!
-//! A template processing library and CLI tool for expanding file and directory references
-//! in text templates. Designed to prepare content for Large Language Models (LLMs) by
-//! embedding file contents and directory content directly into templates.
-//!
-//! ## Features
-//!
-//! - Process templates containing `{{ @file.txt }}` references
-//! - Expand file contents inline
-//! - Recursive directory stitching (concatenation)
-//! - Security: prevents path traversal attacks
-//! - Flexible configuration options
-//!
-//! ## Usage
-//!
-//! ### As a Library
-//!
-//! ```no_run
-//! use textcon::{process_template, TemplateConfig};
-//!
-//! let template = "Here's my code:\n{{ @src/main.rs }}\n\nProject structure:\n{{ @. }}";
-//! let config = TemplateConfig::default();
-//!
-//! match textcon::process_template(template, &config) {
-//!     Ok(result) => println!("{}", result),
-//!     Err(e) => eprintln!("Error: {}", e),
-//! }
-//! ```
-//!
-//! ### As a CLI Tool
-//!
-//! ```bash
-//! # Process a template file
-//! textcon template.txt
-//!
-//! # Process template from stdin
-//! echo "Code: {{ @main.rs }}" | textcon
-//!
-//! # Process with custom base directory
-//! textcon template.txt -b /path/to/project
-//! ```
+//! [`Engine::render_inputs`] emits ordered file or directory bundles, while
+//! [`Engine::expand_template`] streams a template and substitutes `{{ @path }}`
+//! references without buffering the complete input or output.
 
+pub mod cli;
+mod engine;
 pub mod error;
-pub mod fs_utils;
-pub mod template;
+mod parser;
+mod render;
+mod selector;
 
-// Re-export main types and functions for convenience
+pub use engine::{Engine, EngineOptions, RenderMode, SelectionOptions};
 pub use error::{Result, TextconError};
-pub use template::{
-    TemplateConfig, TemplateReference, find_references, process_reference, process_template,
-    process_template_file,
-};

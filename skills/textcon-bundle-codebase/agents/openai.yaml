@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bundle Codebase with textcon"
+  short_description: "Bundle codebases into timestamped Markdown"
+  default_prompt: "Use $textcon-bundle-codebase to bundle this repository into a timestamped CODE Markdown file."

@@ -103,3 +103,29 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: ./cobertura.xml
           fail_ci_if_error: false
+
+  ancillary:
+    name: Man page, package, and agent skill
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install documentation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y scdoc mandoc
+          cargo install just --locked
+      - name: Verify generated man page
+        run: just man-check
+      - name: Verify source-only skill helper
+        run: python3 -m unittest discover -s tests_py
+      - name: Verify Cargo package boundaries
+        shell: bash
+        run: |
+          cargo package --list --locked > package-files.txt
+          grep -qx 'docs/man/textcon.1' package-files.txt
+          grep -qx 'docs/man/textcon.1.scd' package-files.txt
+          if grep -q '^skills/' package-files.txt; then
+            echo 'source-only skill leaked into Cargo package' >&2
+            exit 1
+          fi

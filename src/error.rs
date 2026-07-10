@@ -1,117 +1,76 @@
 use std::io;
 use std::path::PathBuf;
+
 use thiserror::Error;
 
-/// Main error type for textcon operations
-#[derive(Error, Debug)]
+/// Errors returned by the streaming textcon engine.
+#[derive(Debug, Error)]
 pub enum TextconError {
-    /// IO error when reading files or directories
-    #[error("IO error: {0}")]
-    Io(#[from] io::Error),
+    /// Invalid engine or selection configuration.
+    #[error("invalid configuration: {0}")]
+    Config(String),
 
-    /// File not found error with specific path
-    #[error("File not found: {path}")]
-    FileNotFound { path: PathBuf },
+    /// Invalid reference syntax in the input template.
+    #[error("template byte {offset}: {message}")]
+    TemplateSyntax { offset: u64, message: String },
 
-    /// Directory not found error with specific path  
-    #[error("Directory not found: {path}")]
-    DirectoryNotFound { path: PathBuf },
+    /// A reference was denied by the configured sandbox.
+    #[error("sandbox denied reference {path}: {reason}")]
+    SandboxDenied { path: PathBuf, reason: String },
 
-    /// Invalid reference format in template
-    #[error("Invalid reference format: {reference}")]
-    InvalidReference { reference: String },
+    /// A path had an unsupported filesystem type.
+    #[error("unsupported filesystem object: {path}")]
+    UnsupportedFileType { path: PathBuf },
 
-    /// Template parsing error
-    #[error("Template parsing error at position {position}: {message}")]
-    TemplateParse { position: usize, message: String },
-
-    /// Path traversal security error
-    #[error("Path traversal detected (trying to access files outside working directory): {path}")]
-    PathTraversal { path: PathBuf },
-
-    /// File size exceeds limit
-    #[error("File size exceeds limit of {max_size} bytes: {path} ({size} bytes). Use @!{} to force inclusion.", .path.file_name().and_then(|n| n.to_str()).unwrap_or("file"))]
-    FileSizeExceeded {
+    /// A contextual filesystem operation failed.
+    #[error("cannot {operation} {path}: {source}")]
+    PathIo {
+        operation: &'static str,
         path: PathBuf,
-        size: u64,
-        max_size: u64,
+        #[source]
+        source: io::Error,
     },
 
-    /// Regex compilation error
-    #[error("Regex error: {0}")]
-    Regex(#[from] regex::Error),
+    /// Reading a generic input stream failed.
+    #[error("cannot read {name}: {source}")]
+    Input {
+        name: String,
+        #[source]
+        source: io::Error,
+    },
 
-    /// `WalkDir` error when traversing directories
-    #[error("Directory traversal error: {0}")]
-    WalkDir(#[from] walkdir::Error),
+    /// Writing the caller-provided output stream failed.
+    #[error("cannot write output: {0}")]
+    Output(#[source] io::Error),
 
-    /// JSON serialization error
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-
-    /// Ignore crate error
-    #[error("Ignore error: {0}")]
-    Ignore(#[from] ignore::Error),
+    /// An ignore rule could not be parsed.
+    #[error("invalid ignore rule in {origin}: {message}")]
+    Ignore { origin: String, message: String },
 }
 
+impl TextconError {
+    pub(crate) fn path_io(
+        operation: &'static str,
+        path: impl Into<PathBuf>,
+        source: io::Error,
+    ) -> Self {
+        Self::PathIo {
+            operation,
+            path: path.into(),
+            source,
+        }
+    }
+
+    pub(crate) const fn output(source: io::Error) -> Self {
+        Self::Output(source)
+    }
+
+    /// Returns true only for a broken caller-provided output stream.
+    #[must_use]
+    pub fn is_output_broken_pipe(&self) -> bool {
+        matches!(self, Self::Output(error) if error.kind() == io::ErrorKind::BrokenPipe)
+    }
+}
+
+/// Result type used by the textcon library.
 pub type Result<T> = std::result::Result<T, TextconError>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_error_display() {
-        let err = TextconError::FileNotFound {
-            path: PathBuf::from("/test/file.txt"),
-        };
-        assert_eq!(format!("{err}"), "File not found: /test/file.txt");
-
-        let err = TextconError::DirectoryNotFound {
-            path: PathBuf::from("/test/dir"),
-        };
-        assert_eq!(format!("{err}"), "Directory not found: /test/dir");
-
-        let err = TextconError::InvalidReference {
-            reference: "bad_ref".to_string(),
-        };
-        assert_eq!(format!("{err}"), "Invalid reference format: bad_ref");
-
-        let err = TextconError::TemplateParse {
-            position: 42,
-            message: "unexpected token".to_string(),
-        };
-        assert_eq!(
-            format!("{err}"),
-            "Template parsing error at position 42: unexpected token"
-        );
-
-        let err = TextconError::PathTraversal {
-            path: PathBuf::from("/etc/passwd"),
-        };
-        assert!(format!("{err}").contains("Path traversal detected"));
-
-        let err = TextconError::FileSizeExceeded {
-            path: PathBuf::from("large.txt"),
-            size: 100_000,
-            max_size: 65_536,
-        };
-        assert!(format!("{err}").contains("65536"));
-        assert!(format!("{err}").contains("100000"));
-        assert!(format!("{err}").contains("@!large.txt"));
-    }
-
-    #[test]
-    fn test_error_from_io() {
-        let io_err = io::Error::new(io::ErrorKind::NotFound, "test");
-        let err: TextconError = io_err.into();
-        assert!(matches!(err, TextconError::Io(_)));
-    }
-
-    #[test]
-    fn test_error_from_json() {
-        let json_err = serde_json::from_str::<String>("invalid").unwrap_err();
-        let err: TextconError = json_err.into();
-        assert!(matches!(err, TextconError::Json(_)));
-    }
-}

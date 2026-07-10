@@ -1,164 +1,144 @@
 # textcon
 
-[![CI](https://github.com/0x484558/textcon/actions/workflows/ci.yml/badge.svg)](https://github.com/0x484558/textcon/actions/workflows/ci.yml)
-[![Release](https://github.com/0x484558/textcon/actions/workflows/release.yml/badge.svg)](https://github.com/0x484558/textcon/actions/workflows/release.yml)
-[![Documentation](https://github.com/0x484558/textcon/actions/workflows/docs.yml/badge.svg)](https://github.com/0x484558/textcon/actions/workflows/docs.yml)
-[![License: EUPL-1.2](https://img.shields.io/badge/License-EUPL--1.2-blue.svg)](LICENSE)
-[![Crates.io](https://img.shields.io/crates/v/textcon.svg)](https://crates.io/crates/textcon)
+`textcon` is a streaming context composer for code, documentation, logs, and other text-oriented sources. It can bundle shell-selected files or expand explicit `{{ @path }}` references without retaining the complete input or output in memory.
 
-Simple **text** **con**catenation tool that stitches files together into a body of text suitable for consumption by Large Language Models (LLMs). Perfect for preparing code, configurations, and project structures for consumption by web versions of AI assistants like ChatGPT, Claude, Gemini, and others.
-
-Can be used as either CLI tool or Rust library. Embeds file contents directly into templates by resolving references recursively. Resolves relative paths and symlinks within the base directory only, following best security practices to prevent path traversal.
+The core works on bytes. Markdown rendering adds predictable path headings and performs one bounded, lexical heading adjustment for included Markdown documents; it is not a general formatter or sanitizer.
 
 ## Installation
 
-```bash
-cargo install textcon
+Install only the CLI from crates.io:
+
+```sh
+cargo install --locked textcon
 ```
 
-Alternatively, download a release from GitHub.
+Custom GitHub release archives also contain `share/man/man1/textcon.1`, README, and license. Cargo cannot install ancillary man pages.
 
-## Quick Start
+## Operand mode
 
-The simplest way to use `textcon` is to stitch files and directories together:
+Bundle files in shell argument order:
 
-```bash
-# Combine specific files
-textcon src/main.rs src/lib.rs
-
-# Recursively include all files in a directory
-textcon src/
+```sh
+textcon src/main.rs src/lib.rs > CODE.md
+textcon src/*.rs > CODE.md
 ```
 
-For more control, create a template file with `{{ @file }}` references:
+Markdown is the default renderer. Every selected file starts with an H1 path heading followed by its unwrapped body. `.md` and `.markdown` bodies have top-level ATX H1–H5 shifted down one level so their headings remain beneath the file heading.
+
+Use raw mode for exact concatenation:
+
+```sh
+textcon --render raw part1 part2 > combined
+```
+
+Directories are traversed in deterministic depth-first order. `.gitignore` files and hidden descendants are respected by default:
+
+```sh
+textcon . --exclude 'target/' --exclude '!target/' \
+  --exclude 'target/*' --exclude '!target/keep.txt'
+textcon src --max-depth 3 --hidden --no-gitignore
+```
+
+Exclusions use gitignore syntax, are evaluated in command-line order, and override `.gitignore`. Explicit files bypass discovery filters. Discovered symlinks and special files are skipped.
+
+Source and template payloads are streamed with memory independent of their size. Deterministic directory sorting retains one directory's entries at a time, and active ignore rules remain resident while traversing their subtree, so total memory also depends on maximum directory width and ignore-rule size.
+
+Use positional `-` once for direct stdin. Supplying no input is a usage error; stdin is always explicit.
+
+## Template mode
 
 ```text
-# My Project
+# Project
 
-## Source Code
+{{ @README.md }}
 
-{{ @src/main.rs }}
-
-## Project Source
-
-{{ @. }}
+{{ @src | markdown }}
 ```
 
-Process the template using the `--template` flag:
+Expand it with:
 
-```bash
-textcon --template template.txt
+```sh
+textcon --template context.md > expanded.md
+printf 'Config: {{ @config.toml }}' | textcon --template -
 ```
 
-## Reference Format
+Reference behavior follows the inherited `--render` mode:
 
-### Basic Syntax
+| Reference | File | Directory |
+|---|---|---|
+| Bare, Markdown | Unlabelled adaptive body | Unlabelled adaptive bodies without separators |
+| Bare, raw | Exact bytes | Exact bytes without separators |
+| `\| markdown` | Adaptive body, still unlabelled | H1-labelled adaptive records |
+| `\| raw` | Exact bytes | Exact bytes without labels or separators |
 
-| Pattern | Description |
-|---------|-------------|
-| `{{ @file.txt }}` | Include file contents |
-| `{{ @dir/ }}` | Include all file contents in directory |
-| `{{ @. }}` | Include all files from current directory |
+References are expanded once. Placeholder-looking text inside an included file is copied literally and cannot recurse.
 
-All these formats are equivalent for `file.txt` in the current directory:
-- `{{ @file.txt }}`
-- `{{ @/file.txt }}`
-- `{{ @./file.txt }}`
+Relative paths resolve beneath `--base-dir`, defaulting to the current directory. Absolute paths remain absolute, so `{{ @/etc/fstab }}` addresses `/etc/fstab` on Unix. Add `--sandbox` to confine reference reads beneath the base directory using capability-relative filesystem access:
 
-
-### Exclusions
-
-- **.gitignore**: Respected by default. Use `--no-gitignore` to disable.
-- **Manual exclusions**: Use `--exclude "PATTERN"` to exclude specific paths.
-
-Patterns without slashes match at any depth, leading slashes anchor to the base directory, and negation (e.g., `--exclude "!important.txt"`) is supported to explicitly include files.
-
-## CLI Usage
-
-```bash
-# Process a template file
-textcon --template template.txt
-
-# Stitch files and directories together
-textcon src/main.rs src/lib.rs
-
-# Process from stdin
-echo "Code: {{ @main.rs }}" | textcon --template -
-
-# Write to file
-textcon --template template.txt -o output.txt
-
-# Use different base directory
-textcon --template template.txt --base-dir /path/to/project
-
-# Limit directory recursion depth
-textcon src/ --max-depth 3
-
-# Exclude specific files/patterns (glob)
-textcon src/ --exclude "*.log" --exclude "secrets/**"
-
-# Disable .gitignore compliance (enabled by default)
-textcon src/ --no-gitignore
-
-# Check validity of references
-textcon --template template.txt --dry-run
-# (Works with inputs too)
-textcon src/ --dry-run
-
-# List references found in the template
-textcon --template template.txt --list
-# Detailed information
-textcon --template template.txt --list=detailed
-# JSON output for scripting
-textcon --template template.txt --list=json
-
-# View help with examples
-textcon --help
+```sh
+textcon --template context.md --base-dir ./project --sandbox
 ```
 
-## Library Usage
+The template source and positional operands are explicit authority and are not sandboxed.
+
+Use `\{{` for a literal opener. Reference processors are lowercase `raw` or `markdown`; malformed or unterminated reference-like tokens fail with a byte offset. Literal template and included content may contain arbitrary bytes, while reference paths must be UTF-8 without NUL.
+
+## Pipeline behavior
+
+- stdout contains result bytes only.
+- successful execution writes nothing to stderr.
+- exit 0 means success, including a downstream BrokenPipe.
+- operational and template failures exit 1; usage errors exit 2.
+- a late streaming failure can leave a valid prefix on stdout.
+- shell redirection replaces the removed output-file option.
+
+When stdout is a regular file inside a traversed directory, textcon skips that file to avoid ingesting its own growing output.
+
+See [`textcon(1)`](docs/man/textcon.1.scd) for the complete grammar and selection contract.
+
+## Rust API
 
 ```rust
-use std::path::PathBuf;
-use textcon::{process_template, TemplateConfig};
+use std::io;
+use textcon::{Engine, EngineOptions};
 
 fn main() -> textcon::Result<()> {
-    let template = "Project files:\n{{ @src/ }}\n\nMain code:\n{{ @src/main.rs }}";
-    let config = TemplateConfig {
-        base_dir: PathBuf::from("/my/project"),
-        max_tree_depth: Some(3),
-        inline_contents: true,
-        ..TemplateConfig::default()
-    };
-    // Alternatively, `TemplateConfig::default();`
-    
-    let output = process_template(template, &config)?;
-    println!("{}", output);
-    
-    Ok(())
+    let engine = Engine::new(EngineOptions::default())?;
+    engine.expand_template(&mut io::stdin().lock(), &mut io::stdout().lock())
 }
 ```
 
-## Error Handling
+`Engine::render_inputs`, `Engine::render_reader`, and `Engine::expand_template` are streaming operations over caller-provided readers and writers. The library propagates BrokenPipe; only the CLI maps stdout BrokenPipe to success.
 
-Common errors and solutions:
+## AI-agent skill
 
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `File not found` | Reference to non-existent file | Check file path and spelling |
-| `Directory not found` | Reference to non-existent directory | Verify directory exists |
-| `Path traversal detected` | Trying to access outside base dir | Use only relative paths |
-| `Invalid reference format` | Malformed template syntax | Check `{{ @... }}` format |
+The repository contains a source-only, ready-to-copy skill at `skills/textcon-bundle-codebase`. It creates a local, atomically published `CODE-YYYY-MM-DD_HH-MM-SS.md` bundle through a deterministic Python helper.
 
-## Copyright & License
+For Codex on Unix-like systems:
 
-© [Hex](https://github.com/0x484558) @ aleph0 s.r.o. 2025 - Licensed under the EUPL. See [LICENSE](LICENSE) for more info.
+```sh
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+cp -R skills/textcon-bundle-codebase "${CODEX_HOME:-$HOME/.codex}/skills/"
+```
 
-### Acknowledgments
+For Codex in PowerShell:
 
-- [clap](https://github.com/clap-rs/clap) - CLI parsing (Apache-2.0/MIT)
-- [regex](https://github.com/rust-lang/regex) - Pattern matching (Apache-2.0/MIT)
-- [thiserror](https://github.com/dtolnay/thiserror) - Error handling (Apache-2.0/MIT)
-- [walkdir](https://github.com/BurntSushi/walkdir) - Directory traversal (MIT/Unlicense)
-- [ignore](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore) - Fast file ignore (MIT/Unlicense)
-- [serde](https://github.com/serde-rs/serde) - Serialization framework (Apache-2.0/MIT)
+```powershell
+$Skills = if ($env:CODEX_HOME) { Join-Path $env:CODEX_HOME 'skills' } else { Join-Path $HOME '.codex/skills' }
+New-Item -ItemType Directory -Force $Skills | Out-Null
+Copy-Item -Recurse skills/textcon-bundle-codebase $Skills
+```
+
+Copy the same directory into another agent's skill directory when it supports `SKILL.md` packages. The skill is intentionally excluded from Cargo packages and project-built binary release archives and is never installed into a user home automatically.
+
+## Development
+
+```sh
+just verify
+```
+
+Man-page checks require `scdoc` and `mandoc`. The project tests formatting, strict Clippy lints, library/CLI behavior, the generated man page, and the source-only skill helper.
+
+## License
+
+Copyright 2025–2026 0x484558 @ aleph0 s.r.o. Licensed under the EUPL-1.2; see [LICENSE](LICENSE).
