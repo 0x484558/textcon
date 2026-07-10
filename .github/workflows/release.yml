@@ -33,10 +33,11 @@ jobs:
       - name: Verify package contents
         shell: bash
         run: |
-          cargo package --list --locked > package-files.txt
-          grep -qx 'docs/man/textcon.1' package-files.txt
-          grep -qx 'docs/man/textcon.1.scd' package-files.txt
-          if grep -q '^skills/' package-files.txt; then
+          package_files="$RUNNER_TEMP/textcon-package-files.txt"
+          cargo package --list --locked > "$package_files"
+          grep -qx 'docs/man/textcon.1' "$package_files"
+          grep -qx 'docs/man/textcon.1.scd' "$package_files"
+          if grep -q '^skills/' "$package_files"; then
             echo 'source-only skill leaked into Cargo package' >&2
             exit 1
           fi

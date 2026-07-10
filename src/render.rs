@@ -98,24 +98,27 @@ pub(crate) fn encode_path(path: &OsStr) -> String {
         use std::os::windows::ffi::OsStrExt as _;
         let mut encoded = String::new();
         for unit in path.encode_wide() {
-            if unit <= 0x7f && is_safe_ascii(unit as u8, true) {
-                encoded.push(char::from(unit as u8));
-            } else {
-                use std::fmt::Write as _;
-                write!(encoded, "%u{unit:04X}").expect("writing to String cannot fail");
+            match u8::try_from(unit) {
+                Ok(b'\\') => encoded.push('/'),
+                Ok(byte) if is_safe_ascii(byte) => encoded.push(char::from(byte)),
+                _ => {
+                    use std::fmt::Write as _;
+                    write!(encoded, "%u{unit:04X}").expect("writing to String cannot fail");
+                }
             }
         }
-        return encoded;
+        encoded
     }
 
     #[cfg(not(any(unix, windows)))]
     encode_unix_bytes(path.as_encoded_bytes())
 }
 
+#[cfg(not(windows))]
 fn encode_unix_bytes(bytes: &[u8]) -> String {
     let mut encoded = String::new();
     for &byte in bytes {
-        if is_safe_ascii(byte, false) {
+        if is_safe_ascii(byte) {
             encoded.push(char::from(byte));
         } else {
             use std::fmt::Write as _;
@@ -125,10 +128,8 @@ fn encode_unix_bytes(bytes: &[u8]) -> String {
     encoded
 }
 
-const fn is_safe_ascii(byte: u8, windows: bool) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(byte, b'.' | b'_' | b'/' | b'-')
-        || (windows && byte == b'\\')
+const fn is_safe_ascii(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-')
 }
 
 fn transform_markdown<R: Read, W: Write>(
@@ -519,5 +520,11 @@ mod tests {
         use std::os::unix::ffi::OsStrExt as _;
         let path = OsStr::from_bytes(b"a%`\n\xff");
         assert_eq!(encode_path(path), "a%25%60%0A%FF");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_encoding_normalizes_windows_separators() {
+        assert_eq!(encode_path(OsStr::new(r"docs\a.md")), "docs/a.md");
     }
 }

@@ -346,12 +346,17 @@ fn ambient_selection_roots(selected: &Path, policy_anchor: &Path) -> Result<(Pat
     let selected_root = resolve_parent_components(selected)?;
     let anchor = resolve_parent_components(policy_anchor)
         .unwrap_or_else(|_| clean_logical_path(policy_anchor));
-    let policy_root = if selected_root.starts_with(&anchor) {
-        anchor
-    } else {
-        selected_root.clone()
-    };
-    Ok((selected_root, policy_root))
+    if selected_root.starts_with(&anchor) {
+        return Ok((selected_root, anchor));
+    }
+
+    let physical_anchor = canonicalize_for_matching(&anchor)
+        .map_err(|error| TextconError::path_io("resolve policy anchor", &anchor, error))?;
+    if let Ok(relative) = selected_root.strip_prefix(&physical_anchor) {
+        return Ok((anchor.join(relative), anchor));
+    }
+
+    Ok((selected_root.clone(), selected_root))
 }
 
 fn resolve_parent_components(path: &Path) -> Result<PathBuf> {
@@ -508,16 +513,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn parent_resolution_preserves_a_later_symlink_spelling() {
+    fn parent_resolution_rebases_a_physical_anchor_but_preserves_a_later_symlink() {
         use std::os::unix::fs::symlink;
 
         let temporary = TempDir::new().unwrap();
-        let root = temporary.path();
-        fs::create_dir(root.join("sub")).unwrap();
-        fs::create_dir(root.join("real")).unwrap();
-        symlink("real", root.join("alias")).unwrap();
-        let (selected, policy) = ambient_selection_roots(&root.join("sub/../alias"), root).unwrap();
-        assert_eq!(selected, root.join("alias"));
-        assert_eq!(policy, root);
+        let real_root = temporary.path().join("real");
+        let anchor = temporary.path().join("anchor");
+        fs::create_dir(&real_root).unwrap();
+        fs::create_dir(real_root.join("sub")).unwrap();
+        fs::create_dir(real_root.join("target")).unwrap();
+        symlink("real", &anchor).unwrap();
+        symlink("target", real_root.join("alias")).unwrap();
+
+        let (selected, policy) =
+            ambient_selection_roots(&anchor.join("sub/../alias"), &anchor).unwrap();
+
+        assert_eq!(selected, anchor.join("alias"));
+        assert_eq!(policy, anchor);
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "textcon"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 authors = ["0x484558 <hex@aleph0.ai>"]
 description = "Streaming file bundling and one-pass template references for AI/LLM context"

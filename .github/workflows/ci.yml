@@ -15,6 +15,7 @@ jobs:
     name: Test Suite
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         rust: [stable, beta]
@@ -78,8 +79,8 @@ jobs:
 
       - name: Check with minimal versions
         run: |
-          cargo +nightly update -Z minimal-versions
-          cargo check --all-features
+          cargo +nightly update -Z direct-minimal-versions
+          cargo +nightly check --all-features --locked
 
   coverage:
     name: Code Coverage
@@ -110,11 +111,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install documentation tools
+      - name: Install documentation dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y scdoc mandoc
+          sudo apt-get install -y mandoc
           cargo install just --locked
+      - name: Build pinned scdoc
+        shell: bash
+        run: |
+          git clone https://git.sr.ht/~sircmpwn/scdoc "$RUNNER_TEMP/scdoc"
+          git -C "$RUNNER_TEMP/scdoc" checkout --detach 24be30ef17d5ca0162f11b35258c8fa2413d556a
+          test "$(git -C "$RUNNER_TEMP/scdoc" rev-parse HEAD)" = 24be30ef17d5ca0162f11b35258c8fa2413d556a
+          make -C "$RUNNER_TEMP/scdoc" scdoc
+          echo "$RUNNER_TEMP/scdoc" >> "$GITHUB_PATH"
       - name: Verify generated man page
         run: just man-check
       - name: Verify source-only skill helper
@@ -122,10 +131,11 @@ jobs:
       - name: Verify Cargo package boundaries
         shell: bash
         run: |
-          cargo package --list --locked > package-files.txt
-          grep -qx 'docs/man/textcon.1' package-files.txt
-          grep -qx 'docs/man/textcon.1.scd' package-files.txt
-          if grep -q '^skills/' package-files.txt; then
+          package_files="$RUNNER_TEMP/textcon-package-files.txt"
+          cargo package --list --locked > "$package_files"
+          grep -qx 'docs/man/textcon.1' "$package_files"
+          grep -qx 'docs/man/textcon.1.scd' "$package_files"
+          if grep -q '^skills/' "$package_files"; then
             echo 'source-only skill leaked into Cargo package' >&2
             exit 1
           fi

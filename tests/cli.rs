@@ -1,5 +1,7 @@
 use std::fs;
-use std::io::{Read as _, Write as _};
+#[cfg(unix)]
+use std::io::Read as _;
+use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use tempfile::TempDir;
@@ -211,6 +213,50 @@ fn explicitly_selected_directory_symlink_keeps_its_filter_namespace() {
         .unwrap();
     assert!(template.status.success());
     assert_eq!(template.stdout, b"KEEP");
+}
+
+#[cfg(unix)]
+#[test]
+fn aliased_base_retains_gitignore_after_parent_component_resolution() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = TempDir::new().unwrap();
+    let real_root = temporary.path().join("real");
+    let anchor = temporary.path().join("anchor");
+    fs::create_dir(&real_root).unwrap();
+    fs::create_dir(real_root.join("sub")).unwrap();
+    fs::create_dir(real_root.join("content")).unwrap();
+    symlink("real", &anchor).unwrap();
+    symlink("content", real_root.join("alias")).unwrap();
+    fs::write(real_root.join(".gitignore"), "ignored\n").unwrap();
+    fs::write(real_root.join("content/ignored"), "IGNORED").unwrap();
+    fs::write(real_root.join("content/keep"), "KEEP").unwrap();
+    fs::write(temporary.path().join("template"), "{{ @sub/../alias }}").unwrap();
+
+    let output = textcon()
+        .current_dir(temporary.path())
+        .args([
+            "--base-dir",
+            "anchor",
+            "--template",
+            "template",
+            "--render",
+            "raw",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"KEEP",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
